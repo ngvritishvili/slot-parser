@@ -1,0 +1,4 @@
+2026/02/13-16:57:51.536 1288 Reusing MANIFEST D:\webspace\slot-parser\pw_profile\Default\IndexedDB\https_sportsbet.io_0.indexeddb.leveldb/MANIFEST-000001
+2026/02/13-16:57:51.546 1288 Recovering log #4
+2026/02/13-16:57:51.546 1288 Reusing old log D:\webspace\slot-parser\pw_profile\Default\IndexedDB\https_sportsbet.io_0.indexeddb.leveldb/000004.log 
+2026/02/13-16:57:51.607 908 Manual compaction at level-0 from '\x00\x02\x00\x00\x00' @ 72057594037927935 : 1 .. '\x00\x03\x00\x00\x00' @ 0 : 0; will stop at (end)
