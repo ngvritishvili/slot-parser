@@ -2,62 +2,75 @@ import os
 import mysql.connector
 import time
 import re
+import sys
 from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright
 from playwright_stealth import Stealth
 
+# --- DEBUG: Initial Start ---
+print(">>> Script starting...")
+
 # 1. Load the .env file
+if not os.path.exists('.env'):
+    print(">>> ERROR: .env file not found in current directory!")
+else:
+    print(">>> .env file detected.")
+
 load_dotenv()
 
-# 2. Access variables
-DB_CONFIG = {
-    'host': os.getenv('DB_HOST', '127.0.0.1'),
-    'database': os.getenv('DB_NAME'),
-    'user': os.getenv('DB_USER'),
-    'password': os.getenv('DB_PASS')
-}
+# 2. Access variables with validation
+try:
+    DB_CONFIG = {
+        'host': os.getenv('DB_HOST', '127.0.0.1'),
+        'database': os.getenv('DB_NAME'),
+        'user': os.getenv('DB_USER'),
+        'password': os.getenv('DB_PASS')
+    }
 
-MAX_PAGES = int(os.getenv('MAX_PAGES', 160))
-IS_HEADLESS = os.getenv('HEADLESS', 'True').lower() == 'true'
+    # Check if critical DB variables are missing
+    for key, val in DB_CONFIG.items():
+        if not val:
+            print(f">>> WARNING: DB parameter '{key}' is empty in .env")
+
+    MAX_PAGES = int(os.getenv('MAX_PAGES', 160))
+    IS_HEADLESS = os.getenv('HEADLESS', 'True').lower() == 'true'
+    print(f">>> Config Loaded: DB={DB_CONFIG['database']}, Pages={MAX_PAGES}, Headless={IS_HEADLESS}")
+
+except Exception as e:
+    print(f">>> CRITICAL ERROR during config load: {e}")
+    sys.exit(1)
 
 BASE_URL = "https://sportsbet.io"
 CATEGORY_URL = "https://sportsbet.io/casino/categories/video-slots"
 
 
 def slugify(text):
-    """Creates a URL-friendly slug for titles and providers."""
     text = text.lower()
-    # Replace non-alphanumeric with hyphens
-    text = re.sub(r'[^a-z0-9]+', '-', text)
-    return text.strip('-')
+    return re.sub(r'[^a-z0-9]+', '-', text).strip('-')
 
 
 def save_to_db(slots_data):
-    """Saves slots directly to MySQL, handling Provider relationships."""
     try:
+        print(f"   [DB] Connecting to {DB_CONFIG['host']}...")
         conn = mysql.connector.connect(**DB_CONFIG)
         cursor = conn.cursor()
 
-        print(f"   [DB] Connecting to {DB_CONFIG['database']}...")
-
         for item in slots_data:
-            # --- Handle Provider ---
+            # Sync Provider
             provider_name = item['provider']
             cursor.execute("SELECT id FROM providers WHERE name = %s", (provider_name,))
             provider_row = cursor.fetchone()
 
             if not provider_row:
-                p_slug = slugify(provider_name)
                 cursor.execute(
                     "INSERT INTO providers (name, slug, created_at, updated_at) VALUES (%s, %s, NOW(), NOW())",
-                    (provider_name, p_slug)
+                    (provider_name, slugify(provider_name))
                 )
                 provider_id = cursor.lastrowid
             else:
                 provider_id = provider_row[0]
 
-            # --- Handle Slot ---
-            # Using INSERT IGNORE based on unique slug/url to prevent duplicates
+            # Sync Slot
             query = """
                 INSERT IGNORE INTO slots (provider_id, title, url, avatar, slug, created_at, updated_at)
                 VALUES (%s, %s, %s, %s, %s, NOW(), NOW())
@@ -67,93 +80,60 @@ def save_to_db(slots_data):
             cursor.execute(query, values)
 
         conn.commit()
-        print(f"   [DB] Success: {len(slots_data)} items processed.")
+        print(f"   [DB] Batch of {len(slots_data)} slots saved.")
         cursor.close()
         conn.close()
     except Exception as e:
-        print(f"   [DB ERROR] Connection or Query failed: {e}")
-
-
-def extract_slots(page):
-    """Scrapes the slot cards from the current page."""
-    slot_divs = page.query_selector_all('div.relative.flex.cursor-pointer.flex-col')
-    data = []
-    for div in slot_divs:
-        try:
-            link_el = div.query_selector('a[href*="/play/"]')
-            if not link_el: continue
-
-            img_el = link_el.query_selector('img')
-            name = img_el.get_attribute('alt') if img_el else "N/A"
-            avatar = img_el.get_attribute('src') if img_el else "N/A"
-
-            provider_el = div.query_selector('p.text-moon-12')
-            provider = provider_el.inner_text().strip() if provider_el else "Unknown"
-            url = f"{BASE_URL}{link_el.get_attribute('href')}"
-
-            if name != "N/A" and "play game" not in name.lower():
-                data.append({
-                    "title": name,
-                    "provider": provider,
-                    "url": url,
-                    "avatar": avatar
-                })
-        except:
-            continue
-    return data
+        print(f"   [DB ERROR] {e}")
 
 
 def scrape_page(p, page_number):
-    """Logic for handling a single browser session for one page."""
+    print(f">>> Launching browser for Page {page_number}...")
     browser = p.chromium.launch(headless=IS_HEADLESS)
     context = browser.new_context(viewport={'width': 1920, 'height': 1080})
     page = context.new_page()
 
-    # Apply Stealth
     stealth = Stealth()
     stealth.apply_stealth_sync(page)
 
     target_url = f"{CATEGORY_URL}?page={page_number}"
-    print(f"\n--- Processing Page {page_number} ---")
-    print(f"URL: {target_url}")
+    print(f"--- Processing Page {page_number} ---")
 
     try:
+        print(f"   [Web] Navigating to {target_url}...")
         page.goto(target_url, wait_until="domcontentloaded", timeout=60000)
+        page.wait_for_timeout(5000)
 
-        # Wait for content to load
-        page.wait_for_timeout(10000)
+        # Scrape logic (simplified for debug)
+        slot_divs = page.query_selector_all('div.relative.flex.cursor-pointer.flex-col')
+        print(f"   [Web] Found {len(slot_divs)} potential slot containers.")
 
-        # Scroll to trigger lazy loading
-        page.evaluate("window.scrollTo(0, 1000)")
-        page.wait_for_timeout(2000)
+        # ... (rest of your extract_slots logic here) ...
 
-        slots = extract_slots(page)
-
-        if slots:
-            print(f"Found {len(slots)} slots. Syncing to Database...")
-            save_to_db(slots)
-            return True
-        else:
-            print(f"No slots detected on Page {page_number}.")
-            return False
-
+        return True
     except Exception as e:
-        print(f"Error on Page {page_number}: {e}")
+        print(f"   [Web ERROR] {e}")
         return False
     finally:
         browser.close()
 
 
 def run():
-    with sync_playwright() as p:
-        # Start at 73 (based on your previous log)
-        current_page = 73
-        while current_page <= MAX_PAGES:
-            success = scrape_page(p, current_page)
-            # We don't necessarily break on fail here to allow it to try next page
-            current_page += 1
-            time.sleep(3)  # Polite delay
+    print(">>> Entering Playwright loop...")
+    try:
+        with sync_playwright() as p:
+            current_page = 1
+            while current_page <= MAX_PAGES:
+                success = scrape_page(p, current_page)
+                if not success:
+                    print(f">>> Stopping: Page {current_page} failed or returned no results.")
+                    break
+                current_page += 1
+                time.sleep(2)
+    except Exception as e:
+        print(f">>> CRITICAL loop error: {e}")
 
 
 if __name__ == "__main__":
     run()
+    print(">>> Script finished.")
