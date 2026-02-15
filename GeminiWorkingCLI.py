@@ -17,7 +17,7 @@ DB_CONFIG = {
     'password': os.getenv('DB_PASS')
 }
 
-MAX_PAGES = int(os.getenv('MAX_PAGES', 160))
+MAX_PAGES = int(os.getenv('MAX_PAGES', 3))
 # Convert string 'True'/'False' from .env to actual Boolean
 IS_HEADLESS = os.getenv('HEADLESS', 'True').lower() == 'true'
 
