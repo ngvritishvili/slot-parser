@@ -1,14 +1,14 @@
 import requests
 import time
 from playwright.sync_api import sync_playwright
-from playwright_stealth import stealth_sync
+# Corrected Import
+from playwright_stealth import Stealth
 
 # Configuration
 BASE_URL = "https://sportsbet.io"
 CATEGORY_URL = "https://sportsbet.io/casino/categories/video-slots"
 API_ENDPOINT = "http://127.0.0.1:8000/api/slots/sync"
 MAX_PAGES = 160
-
 
 def extract_slots(page):
     """Extracts slot data from the current page state."""
@@ -27,7 +27,6 @@ def extract_slots(page):
             provider = provider_el.inner_text().strip() if provider_el else "Unknown"
             url = f"{BASE_URL}{link_el.get_attribute('href')}"
 
-            # Filter out UI icons like 'play game'
             if name != "N/A" and "play game" not in name.lower():
                 data.append({
                     "title": name,
@@ -39,10 +38,9 @@ def extract_slots(page):
             continue
     return data
 
-
 def scrape_page(p, page_number):
     """Opens a fresh browser context for a specific page number."""
-    # args=["--window-position=1920,0"] opens it on the second monitor
+    # Headless=True is recommended for server CLI
     browser = p.chromium.launch(
         headless=False,
         args=["--window-position=1920,0"]
@@ -54,8 +52,9 @@ def scrape_page(p, page_number):
     )
     page = context.new_page()
 
-    # Apply stealth to hide bot fingerprints
-    stealth_sync(page)
+    # CORRECTED STEALTH CALL
+    stealth = Stealth()
+    stealth.apply_stealth_sync(page)
 
     target_url = f"{CATEGORY_URL}?page={page_number}"
     print(f"\n--- Processing Page {page_number} ---")
@@ -64,11 +63,9 @@ def scrape_page(p, page_number):
     try:
         page.goto(target_url, wait_until="domcontentloaded")
 
-        # Buffer for manual Turnstile solve or slow JS hydration
         print("Waiting 15s for stability/manual solve...")
         page.wait_for_timeout(15000)
 
-        # Scroll to ensure images and lazy elements are rendered
         page.evaluate("window.scrollTo(0, 1200)")
         page.wait_for_timeout(2000)
 
@@ -95,7 +92,6 @@ def scrape_page(p, page_number):
     finally:
         browser.close()
 
-
 def run():
     with sync_playwright() as p:
         current_page = 73
@@ -106,9 +102,7 @@ def run():
 
             print(f"Page {current_page} complete. Cleaning session...")
             current_page += 1
-            # Polite delay between fresh browser launches
             time.sleep(3)
-
 
 if __name__ == "__main__":
     run()

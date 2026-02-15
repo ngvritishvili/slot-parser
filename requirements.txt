@@ -3,3 +3,4 @@ requests~=2.32.5
 python-dotenv
 
 mysql-connector-python~=9.6.0
+playwright-stealth
