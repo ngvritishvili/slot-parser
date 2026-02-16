@@ -119,25 +119,44 @@ def run():
             else:
                 print("   [!] No slots found on this page.")
 
-            # 5. Handle Pagination
-            if current_page < max_pages:
-                next_btn = page.locator('button.pagination-next')
+                # 5. Handle Pagination
+                if current_page < max_pages:
+                    next_btn = page.locator('button.pagination-next')
 
-                # Check if button exists and isn't disabled
-                if next_btn.count() > 0 and next_btn.is_visible() and not next_btn.is_disabled():
-                    print(f"   Moving to next page ({current_page} -> {current_page + 1})...")
-                    next_btn.click()
+                    if next_btn.count() > 0 and next_btn.is_visible() and not next_btn.is_disabled():
+                        print(f"   Moving to next page ({current_page} -> {current_page + 1})...")
 
-                    # Wait for content to change
-                    time.sleep(4)
-                    page.wait_for_load_state("networkidle")
-                    current_page += 1
-                else:
-                    print("   Next button is missing or disabled. Ending run.")
-                    break
-            else:
-                print("   Reached the final page.")
-                break
+                        # Store current first game title to detect when the page actually changes
+                        first_game = page.query_selector('a.game-item img')
+                        old_title = first_game.get_attribute('alt') if first_game else ""
+
+                        next_btn.click()
+
+                        # Relaxed Wait Logic:
+                        try:
+                            # 1. Wait for the URL or DOM to stabilize slightly
+                            page.wait_for_load_state("domcontentloaded", timeout=10000)
+
+                            # 2. Wait until the first game's title is different from the old one
+                            # This confirms the new set of games has loaded
+                            def title_changed(p):
+                                new_el = p.query_selector('a.game-item img')
+                                if not new_el: return False
+                                return new_el.get_attribute('alt') != old_title
+
+                            # Wait up to 15 seconds for the content to swap
+                            for _ in range(30):  # 30 * 0.5s = 15s
+                                if title_changed(page):
+                                    break
+                                time.sleep(0.5)
+
+                        except Exception as e:
+                            print(f"   [Note] Transition wait finished with notice: {e}")
+
+                        current_page += 1
+                    else:
+                        print("   Next button is missing or disabled. Ending run.")
+                        break
 
         browser.close()
         print("\n>>> All pages processed.")
