@@ -1,39 +1,49 @@
 import os
 import time
 import requests
+import re
 from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright
 from playwright_stealth import Stealth
 
+# 1. Load configuration
 load_dotenv()
 
-# Configuration
+# Settings from .env
 API_ENDPOINT = os.getenv('API_ENDPOINT', 'http://checkthisone.online/api/slots/sync')
-MAX_PAGES = int(os.getenv('MAX_PAGES', 5))  # Set how many pages you want to click through
 IS_HEADLESS = os.getenv('HEADLESS', 'True').lower() == 'true'
 TARGET_URL = "https://bc.game/casino/slots"
 BASE_URL = "https://bc.game"
 
 
 def sync_to_laravel(slots_data):
-    if not slots_data: return False
-    print(f"   [API] Syncing {len(slots_data)} slots...")
+    """Sends the scraped slots to your Laravel API for Spatie Media processing."""
+    if not slots_data:
+        return False
+
+    print(f"   [API] Syncing {len(slots_data)} slots to Laravel...")
     try:
+        # 120s timeout to allow Spatie time to download images
         response = requests.post(API_ENDPOINT, json=slots_data, timeout=120)
+
         if response.status_code == 200:
-            details = response.json().get('details', {})
+            res = response.json()
+            details = res.get('details', {})
             print(
-                f"   [SUCCESS] New: {details.get('new_slots_added')}, Skipped: {details.get('existing_slots_skipped')}")
+                f"   [SUCCESS] Added: {details.get('new_slots_added')}, Skipped: {details.get('existing_slots_skipped')}")
             return True
+        else:
+            print(f"   [API ERROR] Status {response.status_code}: {response.text}")
+            return False
     except Exception as e:
-        print(f"   [API ERROR] {e}")
-    return False
+        print(f"   [CONNECTION ERROR] {e}")
+        return False
 
 
 def extract_slots(page):
-    """Parses BC.Game slot items based on the provided HTML structure."""
+    """Parses the grid items from the current view."""
     slots = []
-    # Find all game item anchors
+    # Targeted selector based on your HTML snippet
     items = page.query_selector_all('a.game-item')
 
     for item in items:
@@ -45,13 +55,14 @@ def extract_slots(page):
             title = img.get_attribute('alt') if img else "Unknown"
             avatar = img.get_attribute('src') if img else ""
 
-            # BC.Game often hides the provider name or puts it in the URL slug
-            # For "the-luxe-h-v-by-hacksaw", we can extract 'hacksaw'
+            # Logic to extract provider name from the URL slug
             provider = "Unknown"
             if "by-" in url_path:
+                # Extracts 'hacksaw' from 'the-luxe-h-v-by-hacksaw'
                 provider = url_path.split("by-")[-1].replace("-", " ").title()
 
-            if title and title != "Unknown":
+            # Filter out UI elements or empty titles
+            if title and "play" not in title.lower() and title != "Unknown":
                 slots.append({
                     "title": title,
                     "provider": provider,
@@ -65,50 +76,71 @@ def extract_slots(page):
 
 def run():
     with sync_playwright() as p:
+        # Launch Browser
         browser = p.chromium.launch(headless=IS_HEADLESS)
-        context = browser.new_context(viewport={'width': 1920, 'height': 1080})
+        context = browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            viewport={'width': 1920, 'height': 1080}
+        )
         page = context.new_page()
         Stealth().apply_stealth_sync(page)
 
-        print(f">>> Opening {TARGET_URL}")
-        page.goto(TARGET_URL, wait_until="networkidle")
+        print(f">>> Navigating to {TARGET_URL}")
+        page.goto(TARGET_URL, wait_until="networkidle", timeout=60000)
 
-        for current_page in range(1, MAX_PAGES + 1):
+        current_page = 1
+        max_pages = 1  # This will be updated dynamically from the UI
+
+        while True:
             print(f"\n--- Processing Page {current_page} ---")
 
-            # Wait for items to be visible
+            # 1. Wait for game items to appear
             page.wait_for_selector('a.game-item', timeout=30000)
 
-            # Scroll to load all images on current view
+            # 2. Scroll to bottom to ensure pagination element is rendered
             page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
             time.sleep(2)
 
-            slots = extract_slots(page)
-            if slots:
-                sync_to_laravel(slots)
-
-            # --- PAGINATION LOGIC ---
-            if current_page < MAX_PAGES:
-                print("   Clicking Next Page...")
+            # 3. On the first page, detect the total number of pages (e.g., 129)
+            if current_page == 1:
                 try:
-                    # Target the 'Next' arrow button (usually the last button in pagination)
-                    # Or look for the button with the right arrow SVG
-                    next_button = page.locator('button.next-btn, .pagination button').last
-
-                    if next_button.is_visible():
-                        next_button.click()
-                        # Wait for the content to swap/refresh
-                        time.sleep(3)
-                        page.wait_for_load_state("networkidle")
-                    else:
-                        print("   No more pages found.")
-                        break
+                    # Targets the span inside the pagination div: <span>129</span>
+                    total_pages_element = page.locator('.pagination div span').last
+                    max_pages = int(total_pages_element.inner_text())
+                    print(f">>> Detected Total Pages: {max_pages}")
                 except Exception as e:
-                    print(f"   Pagination failed: {e}")
+                    print(f">>> Could not detect total pages, using fallback. Error: {e}")
+                    max_pages = 160
+
+                    # 4. Scrape data
+            slots_found = extract_slots(page)
+            if slots_found:
+                sync_to_laravel(slots_found)
+            else:
+                print("   [!] No slots found on this page.")
+
+            # 5. Handle Pagination
+            if current_page < max_pages:
+                next_btn = page.locator('button.pagination-next')
+
+                # Check if button exists and isn't disabled
+                if next_btn.count() > 0 and next_btn.is_visible() and not next_btn.is_disabled():
+                    print(f"   Moving to next page ({current_page} -> {current_page + 1})...")
+                    next_btn.click()
+
+                    # Wait for content to change
+                    time.sleep(4)
+                    page.wait_for_load_state("networkidle")
+                    current_page += 1
+                else:
+                    print("   Next button is missing or disabled. Ending run.")
                     break
+            else:
+                print("   Reached the final page.")
+                break
 
         browser.close()
-        print("\n>>> Scrape Complete.")
+        print("\n>>> All pages processed.")
 
 
 if __name__ == "__main__":
