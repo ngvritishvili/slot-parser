@@ -20,46 +20,55 @@ def sync_to_laravel(slots_data):
     print(f"   [API] Syncing {len(slots_data)} new slots...")
     try:
         response = requests.post(API_ENDPOINT, json=slots_data, timeout=120)
-        if response.status_code == 200:
-            details = response.json().get('details', {})
-            print(
-                f"   [SUCCESS] New: {details.get('new_slots_added')}, Skipped: {details.get('existing_slots_skipped')}")
-            return True
+        return response.status_code == 200
     except Exception as e:
         print(f"   [API ERROR] {e}")
-    return False
+        return False
 
 
 def run():
     with sync_playwright() as p:
-        # Stake often detects headless Chromium. We add args to be more human-like.
-        browser = p.chromium.launch(headless=IS_HEADLESS, args=["--disable-blink-features=AutomationControlled"])
-        context = browser.new_context(viewport={'width': 1920, 'height': 1080})
+        # Stake is VERY sensitive. We use extra arguments to hide the automation.
+        browser = p.chromium.launch(
+            headless=IS_HEADLESS,
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--no-sandbox",
+                "--disable-setuid-sandbox"
+            ]
+        )
+        # Randomize User Agent to look less like a server
+        context = browser.new_context(
+            user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            viewport={'width': 1920, 'height': 1080}
+        )
         page = context.new_page()
         Stealth().apply_stealth_sync(page)
 
-        print(f">>> Opening {TARGET_URL} for {CASINO_NAME}")
+        print(f">>> Opening {TARGET_URL}")
 
         try:
-            # FIX: Use 'commit' instead of 'networkidle'
-            page.goto(TARGET_URL, wait_until="commit", timeout=60000)
+            # Use 'domcontentloaded' - Stake is too heavy for 'networkidle'
+            page.goto(TARGET_URL, wait_until="domcontentloaded", timeout=60000)
 
-            # Manual wait for the content to actually render
+            # Look for the grid. If it fails, take a screenshot of the blocker.
             print("   Waiting for initial grid load...")
-            page.wait_for_selector('a[href*="/casino/games/"]', timeout=45000)
+            page.wait_for_selector('a[href*="/casino/games/"]', timeout=30000)
 
         except Exception as e:
-            print(f"!!! Initial Load Error: {e}")
-            # If it times out, we try to proceed anyway if some cards are visible
-            if page.query_selector_all('a[href*="/casino/games/"]').__len__() == 0:
-                browser.close()
-                return
+            print(f"!!! Selector Timeout. Saving debug screenshot to 'stake_error.png'")
+            page.screenshot(path="stake_error.png")
+            print("!!! Check stake_error.png to see if Cloudflare is blocking you.")
+            browser.close()
+            return
 
         synced_ids = set()
 
         while True:
-            # 1. Extract currently visible slots
-            # Note: Stake's classes (svelte-zglogk) change often, targeting href is safer
+            # Scroll a bit to trigger rendering
+            page.evaluate("window.scrollBy(0, 500)")
+            time.sleep(1)
+
             items = page.query_selector_all('a[href*="/casino/games/"]')
             new_batch = []
 
@@ -69,12 +78,10 @@ def run():
                     game_id = url_path.split('/')[-1] if url_path else ""
 
                     if game_id and game_id not in synced_ids:
-                        # Stake's DOM is nested. We look for the alt on img or the span text
                         img_el = item.query_selector('img')
                         title = img_el.get_attribute('alt') if img_el else "Unknown"
 
-                        # Provider is usually in the second text block
-                        # We use a broad selector to find the provider text
+                        # Provider extraction
                         provider = "Unknown"
                         provider_el = item.query_selector('p, span.provider-name, strong')
                         if provider_el:
@@ -96,27 +103,22 @@ def run():
             if new_batch:
                 sync_to_laravel(new_batch)
 
-            # 2. Handle "Load More"
-            # Stake uses a button that often contains a 'loader' div
-            load_more = page.get_by_role("button", name="Load More")
+            # Stake "Load More" button is usually in a div with .contents
+            load_more = page.locator('button:has-text("Load More")')
 
-            if load_more.is_visible() and load_more.is_enabled():
-                print(f"--- Clicking 'Load More' (Total seen: {len(synced_ids)}) ---")
-                load_more.scroll_into_view_if_needed()
+            if load_more.is_visible():
+                print(f"--- Clicking 'Load More' (Total: {len(synced_ids)}) ---")
                 load_more.click()
-                time.sleep(4)  # Stake needs a long breath to load next 30+ items
+                time.sleep(3)
             else:
-                # Scroll down one last time to check if more appear (Lazy load check)
-                page.evaluate("window.scrollBy(0, 500)")
+                # Try one deep scroll to see if it appears
+                page.keyboard.press("End")
                 time.sleep(2)
-                if not page.get_by_role("button", name="Load More").is_visible():
-                    print(">>> No 'Load More' button found. Reached the end.")
+                if not load_more.is_visible():
                     break
 
-            if len(synced_ids) > 10000: break
-
         browser.close()
-        print(f"\n>>> Scrape Complete for Stake. Total synced: {len(synced_ids)}")
+        print(f">>> Done. Total: {len(synced_ids)}")
 
 
 if __name__ == "__main__":
