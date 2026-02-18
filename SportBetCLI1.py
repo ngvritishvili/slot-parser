@@ -10,8 +10,8 @@ load_dotenv()
 
 # --- CONFIGURATION ---
 CASINO_NAME = "https://sportsbet.io" # Explicitly defined
-API_ENDPOINT = os.getenv('API_ENDPOINT', 'http://127.0.0.1:8000/api/slots/sync')
-MAX_PAGES = int(os.getenv('MAX_PAGES', 160))
+API_ENDPOINT = os.getenv('API_ENDPOINT', 'http://checkthisone.online/api/slots/sync')
+MAX_PAGES = int(os.getenv('MAX_PAGES', 3))
 IS_HEADLESS = os.getenv('HEADLESS', 'True').lower() == 'true'
 BASE_URL = "https://sportsbet.io"
 CATEGORY_URL = "https://sportsbet.io/casino/categories/video-slots"
