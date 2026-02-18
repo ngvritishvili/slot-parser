@@ -1,3 +1,4 @@
+# how to run? xvfb-run python3 Bet365CLI.py
 import os
 import time
 import requests
