@@ -54,21 +54,30 @@ def run():
             for item in items:
                 title = item.get_attribute('aria-label')
 
-                # Only process if we haven't seen this title in the current run
                 if title and title not in synced_titles:
-                    img = item.query_selector('img.imageContainer')
-                    avatar = img.get_attribute('src') if img else ""
+                    # 1. Use a more robust selector to find the image
+                    # We look for ANY img tag within the div[data-testid="launchGame"]
+                    img = item.query_selector('img')
 
-                    # Protocol-relative URL fix (e.g., //content... -> https://content...)
+                    avatar = ""
+                    if img:
+                        # Try to get src, if empty, try data-src (common for lazy-loading)
+                        avatar = img.get_attribute('src') or img.get_attribute('data-src') or ""
+
+                    # 2. Protocol-relative URL fix
                     if avatar.startswith('//'):
                         avatar = 'https:' + avatar
 
+                    # 3. Validation: If avatar is still empty, let's log it for debugging
+                    if not avatar:
+                        print(f"      [!] Warning: No avatar found for {title}")
+
                     new_batch.append({
                         "title": title,
-                        "provider": "Bet365", # Note: Provider is not easily found in the grid view
+                        "provider": "Bet365",
                         "url": TARGET_URL,
                         "avatar": avatar,
-                        "casino_name": CASINO_NAME  # <--- Added static casino name
+                        "casino_name": CASINO_NAME
                     })
                     synced_titles.add(title)
 
