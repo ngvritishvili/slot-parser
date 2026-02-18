@@ -1,0 +1,110 @@
+import os
+import time
+import requests
+from dotenv import load_dotenv
+from playwright.sync_api import sync_playwright
+from playwright_stealth import Stealth
+
+load_dotenv()
+
+# --- CONFIGURATION ---
+CASINO_NAME = "BitStarz"
+API_ENDPOINT = os.getenv('API_ENDPOINT', 'http://checkthisone.online/api/slots/sync')
+IS_HEADLESS = os.getenv('HEADLESS', 'True').lower() == 'true'
+TARGET_URL = "https://www.bitstarz.com/slots"
+BASE_URL = "https://www.bitstarz.com"
+
+
+def sync_to_laravel(slots_data):
+    if not slots_data: return False
+    print(f"   [API] Syncing {len(slots_data)} new slots...")
+    try:
+        response = requests.post(API_ENDPOINT, json=slots_data, timeout=120)
+        if response.status_code == 200:
+            details = response.json().get('details', {})
+            print(
+                f"   [SUCCESS] New: {details.get('new_slots_added')}, Skipped: {details.get('existing_slots_skipped')}")
+            return True
+    except Exception as e:
+        print(f"   [API ERROR] {e}")
+    return False
+
+
+def run():
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=IS_HEADLESS)
+        context = browser.new_context(viewport={'width': 1920, 'height': 1080})
+        page = context.new_page()
+        Stealth().apply_stealth_sync(page)
+
+        print(f">>> Opening {TARGET_URL}")
+        page.goto(TARGET_URL, wait_until="networkidle", timeout=90000)
+
+        synced_slugs = set()
+
+        while True:
+            # 1. Wait for game boxes to render
+            page.wait_for_selector('.game-box', timeout=30000)
+
+            # 2. Extract slots
+            items = page.query_selector_all('.game-box')
+            new_batch = []
+
+            for item in items:
+                try:
+                    # Link and Slug
+                    link_el = item.query_selector('a.game-box__link')
+                    url_path = link_el.get_attribute('href') if link_el else ""
+                    slug = url_path.split('/')[-1] if url_path else ""
+
+                    if slug and slug not in synced_slugs:
+                        # Title from the main image alt
+                        img_el = item.query_selector('img.game-image')
+                        title = img_el.get_attribute('alt') if img_el else "Unknown"
+                        avatar = img_el.get_attribute('src') if img_el else ""
+
+                        # Provider from the tooltip div
+                        provider_el = item.query_selector('.game-box__provider-tooltip')
+                        provider = provider_el.inner_text().strip() if provider_el else "Unknown"
+
+                        new_batch.append({
+                            "title": title,
+                            "provider": provider,
+                            "url": f"{BASE_URL}{url_path}",
+                            "avatar": avatar,
+                            "casino_name": CASINO_NAME
+                        })
+                        synced_slugs.add(slug)
+                except:
+                    continue
+
+            # 3. Sync to Laravel
+            if new_batch:
+                sync_to_laravel(new_batch)
+
+            # 4. Handle "Load More"
+            # Target the button inside the specific category container
+            load_more_container = page.locator('.category-games-load-more-button')
+            load_more_button = load_more_container.locator('button')
+
+            if load_more_button.is_visible():
+                print(f"--- Clicking 'Load More' (Total seen: {len(synced_slugs)}) ---")
+                load_more_button.scroll_into_view_if_needed()
+                # BitStarz sometimes needs a real click on the span/label
+                load_more_button.click()
+
+                # Wait for the next grid to append
+                time.sleep(3)
+            else:
+                print(">>> No more 'Load More' button found.")
+                break
+
+            # Safety break
+            if len(synced_slugs) > 5000: break
+
+        browser.close()
+        print(f"\n>>> Scrape Complete. Total: {len(synced_slugs)}")
+
+
+if __name__ == "__main__":
+    run()
