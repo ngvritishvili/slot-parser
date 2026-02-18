@@ -8,7 +8,8 @@ from playwright_stealth import Stealth
 
 load_dotenv()
 
-# Configuration
+# --- CONFIGURATION ---
+CASINO_NAME = "https://bc.game"  # <--- Specify your static casino name here
 API_ENDPOINT = os.getenv('API_ENDPOINT', 'http://checkthisone.online/api/slots/sync')
 IS_HEADLESS = os.getenv('HEADLESS', 'True').lower() == 'true'
 TARGET_URL = "https://bc.game/casino/slots"
@@ -16,21 +17,23 @@ BASE_URL = "https://bc.game"
 
 
 def sync_to_laravel(slots_data):
-    if not slots_data: return False
+    if not slots_data:
+        return False
     print(f"   [API] Syncing {len(slots_data)} slots...")
     try:
         response = requests.post(API_ENDPOINT, json=slots_data, timeout=120)
         if response.status_code == 200:
             details = response.json().get('details', {})
-            print(
-                f"   [SUCCESS] New: {details.get('new_slots_added')}, Skipped: {details.get('existing_slots_skipped')}")
+            print(f"   [SUCCESS] New: {details.get('new_slots_added')}, Skipped: {details.get('existing_slots_skipped')}")
             return True
+        else:
+            print(f"   [API ERROR] Status {response.status_code}: {response.text}")
     except Exception as e:
         print(f"   [API ERROR] {e}")
     return False
 
 
-def extract_slots(page):
+def extract_slots(page, casino_name):
     slots = []
     items = page.query_selector_all('a.game-item')
     for item in items:
@@ -46,7 +49,13 @@ def extract_slots(page):
                 provider = url_path.split("by-")[-1].replace("-", " ").title()
 
             if title and "play" not in title.lower():
-                slots.append({"title": title, "provider": provider, "url": url, "avatar": avatar})
+                slots.append({
+                    "title": title,
+                    "provider": provider,
+                    "url": url,
+                    "avatar": avatar,
+                    "casino_name": casino_name
+                })
         except:
             continue
     return slots
@@ -59,7 +68,7 @@ def run():
         page = context.new_page()
         Stealth().apply_stealth_sync(page)
 
-        print(f">>> Opening {TARGET_URL}")
+        print(f">>> Opening {TARGET_URL} for {CASINO_NAME}")
         page.goto(TARGET_URL, wait_until="domcontentloaded", timeout=60000)
 
         current_page = 1
@@ -80,10 +89,11 @@ def run():
                     max_pages = int(total_pages_text)
                     print(f">>> Detected Total Pages: {max_pages}")
                 except:
+                    print(">>> Could not detect pagination, using default.")
                     max_pages = 129
 
             # 3. Scrape and Sync
-            slots = extract_slots(page)
+            slots = extract_slots(page, CASINO_NAME)
             if slots:
                 sync_to_laravel(slots)
 
@@ -99,8 +109,7 @@ def run():
                     print(f"   Clicking Next (moving to {current_page + 1})...")
                     next_btn.click()
 
-                    # 5. WAIT FOR CONTENT TO CHANGE (instead of networkidle)
-                    # We wait until the first slot image 'alt' tag is different
+                    # 5. WAIT FOR CONTENT TO CHANGE
                     page_changed = False
                     for _ in range(20):  # 10 seconds max
                         time.sleep(0.5)
@@ -114,7 +123,7 @@ def run():
                     if not page_changed:
                         print("   [Warning] Content didn't seem to change, but moving on...")
 
-                    current_page += 1  # INCREMENT COUNTER
+                    current_page += 1
                 else:
                     print("   Next button is disabled or hidden. Finishing.")
                     break
@@ -123,7 +132,7 @@ def run():
                 break
 
         browser.close()
-        print("\n>>> Scrape Complete.")
+        print(f"\n>>> Scrape Complete for {CASINO_NAME}.")
 
 
 if __name__ == "__main__":
