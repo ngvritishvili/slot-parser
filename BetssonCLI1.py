@@ -12,7 +12,7 @@ load_dotenv()
 CASINO_NAME = "https://ge.betsson.com"
 API_ENDPOINT = os.getenv('API_ENDPOINT', 'http://checkthisone.online/api/slots/sync')
 IS_HEADLESS = os.getenv('HEADLESS', 'True').lower() == 'true'
-TARGET_URL = "https://ge.betsson.com/ka/casino/slots"  # Targeted specifically to slots
+TARGET_URL = "https://ge.betsson.com/ka/slots"  # Targeted specifically to slots
 
 
 def sync_to_laravel(slots_data):
