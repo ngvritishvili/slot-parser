@@ -9,7 +9,7 @@ load_dotenv()
 
 # --- CONFIGURATION ---
 CASINO_NAME = "Roobet"  # Consistent name for DB
-API_ENDPOINT = os.getenv('API_ENDPOINT', 'http://127.0.0.1/api/slots/sync')
+API_ENDPOINT = os.getenv('API_ENDPOINT', 'http://checkthisone.online/api/slots/sync')
 IS_HEADLESS = os.getenv('HEADLESS', 'True').lower() == 'true'
 TARGET_URL = "https://roobet.com/casino/category/slots?sort=pop_desc"
 BASE_URL = "https://roobet.com"
