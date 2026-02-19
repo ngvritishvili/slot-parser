@@ -8,7 +8,7 @@ from playwright_stealth import Stealth
 load_dotenv()
 
 # --- CONFIGURATION ---
-CASINO_NAME = "https://www.mrgreen.com"
+CASINO_NAME = "https://mrgreen.com"
 API_ENDPOINT = os.getenv('API_ENDPOINT', 'http://checkthisone.online/api/slots/sync')
 IS_HEADLESS = os.getenv('HEADLESS', 'True').lower() == 'true'
 TARGET_URL = "https://www.mrgreen.com/slots/"
