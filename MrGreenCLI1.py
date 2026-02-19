@@ -16,13 +16,16 @@ TARGET_URL = "https://www.mrgreen.com/slots/"
 
 def sync_to_laravel(slots_data):
     if not slots_data: return False
-    print(f"   [API] Syncing {len(slots_data)} new slots...")
+    print(f"   [API] Syncing {len(slots_data)} slots...")
     try:
         response = requests.post(API_ENDPOINT, json=slots_data, timeout=120)
         if response.status_code == 200:
-            details = response.json().get('details', {})
-            print(
-                f"   [SUCCESS] New: {details.get('new_slots_added')}, Skipped: {details.get('existing_slots_skipped')}")
+            res = response.json()
+            details = res.get('details', {})
+            # FIXED: Matching your Laravel refactor keys
+            new = details.get('new_links_added', 0)
+            skipped = details.get('existing_links_skipped', 0)
+            print(f"   [SUCCESS] New Links: {new}, Skipped: {skipped}")
             return True
     except Exception as e:
         print(f"   [API ERROR] {e}")
@@ -31,47 +34,45 @@ def sync_to_laravel(slots_data):
 
 def run():
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=IS_HEADLESS)
+        browser = p.chromium.launch(headless=IS_HEADLESS, args=["--disable-blink-features=AutomationControlled"])
         context = browser.new_context(viewport={'width': 1920, 'height': 1080})
         page = context.new_page()
         Stealth().apply_stealth_sync(page)
 
         print(f">>> Opening {TARGET_URL}")
-        page.goto(TARGET_URL, wait_until="networkidle", timeout=90000)
+        try:
+            # Use domcontentloaded to avoid the timeout
+            page.goto(TARGET_URL, wait_until="domcontentloaded", timeout=60000)
+            # Wait for the game grid specifically
+            page.wait_for_selector('.cy-single-game-regular-template', timeout=45000)
+        except Exception as e:
+            print(f"!!! Initial Load Failed: {e}")
+            browser.close()
+            return
 
         synced_titles = set()
 
-        # 1. Identify all Swiper/Carousel sections on the page
-        # Each section usually has its own 'Next' button
-        swipers = page.query_selector_all('.sc-cLVkoy')  # The container for the next button
+        # 1. Identify containers that hold the swiper/sliders
+        # We target the common parent of the game templates
+        print("   Scanning page for sliders...")
 
-        print(f">>> Found {len(swipers)} game categories to scroll.")
+        # 2. Extract slots by scrolling. Mr Green sliders usually expand
+        # or load more as you scroll the main page down too.
+        scroll_count = 0
+        while scroll_count < 20:
+            items = page.query_selector_all('.cy-single-game-regular-template')
+            new_batch = []
 
-        # 2. Iterate through each horizontal slider
-        for index, swiper_container in enumerate(swipers):
-            print(f"--- Processing Slider {index + 1} ---")
-
-            # Find the 'Next' button specifically within this slider
-            next_btn = swiper_container.query_selector('button.cy-swiper-button-next')
-
-            # Click next until the button is disabled or disappears (end of list)
-            # We use a loop for horizontal sliding
-            for _ in range(15):  # Arbitrary limit per category to avoid infinite loops
-
-                # Extract visible slots in this specific moment
-                items = page.query_selector_all('.cy-single-game-regular-template')
-                new_batch = []
-
-                for item in items:
+            for item in items:
+                try:
                     title_el = item.query_selector('.cy-game-title')
                     title = title_el.inner_text().strip() if title_el else ""
 
                     if title and title not in synced_titles:
-                        # Extract image
                         img_el = item.query_selector('img.cy-game-image')
                         avatar = img_el.get_attribute('src') if img_el else ""
 
-                        # Extract Provider from class names (e.g., game-company-pragmatic)
+                        # Extract Provider from class list (it was in your element snippet)
                         classes = item.get_attribute('class') or ""
                         provider = "Unknown"
                         for cls in classes.split():
@@ -86,19 +87,30 @@ def run():
                             "casino_name": CASINO_NAME
                         })
                         synced_titles.add(title)
+                except:
+                    continue
 
-                if new_batch:
-                    sync_to_laravel(new_batch)
+            if new_batch:
+                sync_to_laravel(new_batch)
 
-                # Check if we can click 'Next'
-                if next_btn and next_btn.is_visible() and next_btn.is_enabled():
-                    next_btn.click()
-                    time.sleep(1)  # Short wait for the slide animation
-                else:
-                    break  # Reached the end of this slider
+            # 3. Horizontal Swiping Logic
+            # Mr Green often uses a generic swiper-button-next
+            next_buttons = page.locator('button.cy-swiper-button-next').all()
+            for btn in next_buttons:
+                if btn.is_visible() and btn.is_enabled():
+                    btn.click()
+                    time.sleep(0.5)
+
+            # 4. Vertical Scrolling (to trigger more categories)
+            page.mouse.wheel(0, 800)
+            time.sleep(2)
+            scroll_count += 1
+
+            # If we've seen enough or the page stopped growing
+            if len(synced_titles) > 5000: break
 
         browser.close()
-        print(f"\n>>> Scrape Complete for Mr Green. Total: {len(synced_titles)}")
+        print(f"\n>>> Scrape Complete for Mr Green. Total synced: {len(synced_titles)}")
 
 
 if __name__ == "__main__":
