@@ -8,7 +8,7 @@ from playwright_stealth import Stealth
 load_dotenv()
 
 # --- CONFIGURATION ---
-CASINO_NAME = "Roobet"  # Consistent name for DB
+CASINO_NAME = "Roobet"
 API_ENDPOINT = os.getenv('API_ENDPOINT', 'http://checkthisone.online/api/slots/sync')
 IS_HEADLESS = os.getenv('HEADLESS', 'True').lower() == 'true'
 TARGET_URL = "https://roobet.com/casino/category/slots?sort=pop_desc"
@@ -17,14 +17,19 @@ BASE_URL = "https://roobet.com"
 
 def sync_to_laravel(slots_data):
     if not slots_data: return False
-    print(f"   [API] Syncing {len(slots_data)} new slots...")
+    print(f"   [API] Syncing {len(slots_data)} slots to {API_ENDPOINT}...")
     try:
         response = requests.post(API_ENDPOINT, json=slots_data, timeout=120)
         if response.status_code == 200:
-            details = response.json().get('details', {})
-            print(
-                f"   [SUCCESS] New: {details.get('new_slots_added')}, Skipped: {details.get('existing_slots_skipped')}")
+            res = response.json()
+            details = res.get('details', {})
+            # Updated keys to match your Laravel refactor
+            new = details.get('new_links_added', 0)
+            skipped = details.get('existing_links_skipped', 0)
+            print(f"   [SUCCESS] New Links: {new}, Skipped: {skipped}")
             return True
+        else:
+            print(f"   [API ERROR] {response.status_code}: {response.text}")
     except Exception as e:
         print(f"   [API ERROR] {e}")
     return False
@@ -32,33 +37,29 @@ def sync_to_laravel(slots_data):
 
 def run():
     with sync_playwright() as p:
-        # Launch with extra arguments to help avoid Cloudflare detection
         browser = p.chromium.launch(headless=IS_HEADLESS, args=["--disable-blink-features=AutomationControlled"])
         context = browser.new_context(viewport={'width': 1920, 'height': 1080})
         page = context.new_page()
         Stealth().apply_stealth_sync(page)
 
-        print(f">>> Opening {TARGET_URL} for {CASINO_NAME}")
-
+        print(f">>> Opening {TARGET_URL}")
         try:
-            # CHANGE: wait_until="domcontentloaded" is much faster and reliable for SPAs
             page.goto(TARGET_URL, wait_until="domcontentloaded", timeout=60000)
-
-            # Now explicitly wait for the game links to appear
-            print("   Waiting for game grid to render...")
             page.wait_for_selector('a[href^="/casino/game/"]', timeout=45000)
         except Exception as e:
             print(f"!!! Initial Load Failed: {e}")
-            # Save screenshot for debugging
             page.screenshot(path="roobet_error.png")
-            print("!!! Saved roobet_error.png. Check if blocked by Cloudflare.")
             browser.close()
             return
 
         synced_slugs = set()
 
         while True:
-            # 1. Extract slots using the link selector
+            # 1. Scroll to the bottom to trigger image loading and button visibility
+            page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            time.sleep(2)
+
+            # 2. Extract items
             items = page.query_selector_all('a[href^="/casino/game/"]')
             new_batch = []
 
@@ -70,24 +71,20 @@ def run():
                     if slug and slug not in synced_slugs:
                         title = item.get_attribute('aria-label') or "Unknown"
 
-                        # Logic to guess provider from slug (Roobet standard)
+                        # Better provider extraction from aria-label if available
+                        # Often aria-label is "Game Title by Provider"
                         provider = "Unknown"
-                        if slug:
-                            parts = slug.split('-')
-                            provider = parts[0].capitalize() if len(parts) > 0 else "Unknown"
+                        if " by " in title.lower():
+                            provider = title.lower().split(" by ")[-1].title()
+                        elif slug:
+                            provider = slug.split('-')[0].capitalize()
 
-                        # Image extraction
                         img_el = item.query_selector('img')
                         avatar = ""
                         if img_el:
-                            raw_src = img_el.get_attribute('src') or ""
-                            # Fix Roobet's relative CDN paths
-                            if raw_src.startswith('/'):
-                                avatar = f"{BASE_URL}{raw_src}"
-                            elif 'cdn-cgi' in raw_src:
-                                avatar = f"{BASE_URL}/{raw_src}"
-                            else:
-                                avatar = raw_src
+                            avatar = img_el.get_attribute('src') or ""
+                            if avatar.startswith('/'):
+                                avatar = f"{BASE_URL}{avatar}"
 
                         new_batch.append({
                             "title": title,
@@ -100,31 +97,33 @@ def run():
                 except:
                     continue
 
+            # 3. Send to Laravel
             if new_batch:
                 sync_to_laravel(new_batch)
 
-            # 2. Handle "Load More Games"
-            # Roobet buttons are often nested in spans/divs
+            # 4. Handle "Load More"
+            # Roobet uses a button that might be hidden under a 'Load More Games' text
             load_more = page.get_by_role("button", name="Load More Games")
 
-            if load_more.is_visible() and load_more.is_enabled():
-                print(f"--- Clicking 'Load More' (Total seen: {len(synced_slugs)}) ---")
-                load_more.scroll_into_view_if_needed()
+            if load_more.is_visible():
+                print(f"--- Clicking 'Load More' (Seen so far: {len(synced_slugs)}) ---")
                 load_more.click()
-                # Important: Roobet needs time to inject new items into the DOM
-                time.sleep(5)
+                time.sleep(5)  # Critical wait for content injection
             else:
-                # One last scroll attempt in case it's lazy loading
-                page.keyboard.press("End")
+                # Last ditch effort: scroll again
+                page.evaluate("window.scrollBy(0, -500)")  # Scroll up slightly
+                time.sleep(1)
+                page.evaluate("window.scrollTo(0, document.body.scrollHeight)")  # Scroll down
                 time.sleep(2)
-                if not page.get_by_role("button", name="Load More Games").is_visible():
+
+                if not load_more.is_visible():
                     print(">>> No more 'Load More' button found.")
                     break
 
-            if len(synced_slugs) > 5000: break
+            if len(synced_slugs) > 10000: break
 
         browser.close()
-        print(f"\n>>> Scrape Complete for Roobet. Total synced: {len(synced_slugs)}")
+        print(f"\n>>> Scrape Complete. Total: {len(synced_slugs)}")
 
 
 if __name__ == "__main__":
