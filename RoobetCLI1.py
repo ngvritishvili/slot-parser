@@ -55,9 +55,10 @@ def run():
         synced_slugs = set()
 
         while True:
-            # 1. Scroll to the bottom to trigger image loading and button visibility
-            page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-            time.sleep(2)
+            # 1. SCROLL DOWN in increments to trigger lazy-load and reveal the button
+            for _ in range(5):
+                page.evaluate("window.scrollBy(0, 800)")
+                time.sleep(0.5)
 
             # 2. Extract items
             items = page.query_selector_all('a[href^="/casino/game/"]')
@@ -71,8 +72,6 @@ def run():
                     if slug and slug not in synced_slugs:
                         title = item.get_attribute('aria-label') or "Unknown"
 
-                        # Better provider extraction from aria-label if available
-                        # Often aria-label is "Game Title by Provider"
                         provider = "Unknown"
                         if " by " in title.lower():
                             provider = title.lower().split(" by ")[-1].title()
@@ -97,25 +96,30 @@ def run():
                 except:
                     continue
 
-            # 3. Send to Laravel
             if new_batch:
                 sync_to_laravel(new_batch)
 
-            # 4. Handle "Load More"
-            # Roobet uses a button that might be hidden under a 'Load More Games' text
-            load_more = page.get_by_role("button", name="Load More Games")
+            # 3. FIX: New Button Detection Logic
+            # We look for a button that has a span inside it containing "Load More Games"
+            load_more = page.locator('button:has(span:text-is("Load More Games"))')
 
-            if load_more.is_visible():
-                print(f"--- Clicking 'Load More' (Seen so far: {len(synced_slugs)}) ---")
-                load_more.click()
-                time.sleep(5)  # Critical wait for content injection
+            # If the specific text search fails, try a broader search for the class pattern
+            if not load_more.is_visible():
+                load_more = page.locator('button.MuiButton-root:has-text("Load More Games")')
+
+            if load_more.is_visible() and load_more.is_enabled():
+                print(f"--- Clicking 'Load More' (Seen: {len(synced_slugs)}) ---")
+                load_more.scroll_into_view_if_needed()
+                # Use force=True because Roobet sometimes puts an invisible overlay
+                # (like a loading bar) over the button
+                load_more.click(force=True)
+
+                # Wait for the "Loading" state to pass and new items to appear
+                time.sleep(5)
             else:
-                # Last ditch effort: scroll again
-                page.evaluate("window.scrollBy(0, -500)")  # Scroll up slightly
-                time.sleep(1)
-                page.evaluate("window.scrollTo(0, document.body.scrollHeight)")  # Scroll down
+                # One last attempt: Check if the button is just lower down
+                page.keyboard.press("End")
                 time.sleep(2)
-
                 if not load_more.is_visible():
                     print(">>> No more 'Load More' button found.")
                     break
