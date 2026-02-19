@@ -22,13 +22,10 @@ def sync_to_laravel(slots_data):
         if response.status_code == 200:
             res = response.json()
             details = res.get('details', {})
-            # FIXED: Using your new Laravel response keys
             new = details.get('new_links_added', 0)
             skipped = details.get('existing_links_skipped', 0)
             print(f"   [SUCCESS] New Links: {new}, Skipped: {skipped}")
             return True
-        else:
-            print(f"   [API ERROR] {response.status_code}: {response.text}")
     except Exception as e:
         print(f"   [API ERROR] {e}")
     return False
@@ -43,51 +40,47 @@ def run():
 
         print(f">>> Opening {TARGET_URL}")
         try:
-            page.goto(TARGET_URL, wait_until="domcontentloaded", timeout=60000)
-            # Wait for the grid to appear
-            page.wait_for_selector('[data-testid^="game-card-"]', timeout=30000)
-        except Exception as e:
-            print(f"!!! Initial Load Failed: {e}")
-            browser.close()
-            return
+            page.goto(TARGET_URL, wait_until="networkidle", timeout=60000)
+        except:
+            page.goto(TARGET_URL, wait_until="domcontentloaded")
 
         synced_titles = set()
 
         while True:
-            # 1. SCROLL DOWN to ensure all currently loaded cards are rendered
-            page.evaluate("window.scrollBy(0, 800)")
-            time.sleep(1)
+            # 1. Wait for any game card title to ensure the grid is loaded
+            page.wait_for_selector('[data-testid$="-title"]', timeout=30000)
 
             # 2. Extract visible slots
-            # We look for all cards, but focus on the ones with titles
-            cards = page.query_selector_all('[data-testid^="game-card-"]')
-            new_batch = []
+            # We target only the parent DIVs that have an ID like game-card-0, game-card-1
+            # The regex ^game-card-\d+$ ensures we only get the root containers
+            cards = page.query_selector_all('div[data-testid^="game-card-"]')
 
+            new_batch = []
             for card in cards:
                 try:
-                    # Target the title element specifically
-                    title_el = card.query_selector('[data-testid$="-title"]')
-                    if not title_el: continue
+                    testid = card.get_attribute('data-testid')
+                    # Skip sub-elements like "game-card-0-image"
+                    if not testid or not testid.split('-')[-1].isdigit():
+                        continue
 
-                    title = title_el.inner_text().strip()
+                    title_el = card.query_selector('[data-testid$="-title"]')
+                    title = title_el.inner_text().strip() if title_el else ""
 
                     if title and title not in synced_titles:
                         provider_el = card.query_selector('[data-testid$="-provider"]')
                         provider = provider_el.inner_text().strip() if provider_el else "Unknown"
 
-                        img_el = card.query_selector('img')
+                        # Image handling
+                        img_el = card.query_selector('img[data-testid$="-image"]')
                         avatar = img_el.get_attribute('src') if img_el else ""
 
-                        # Some cards have links, some don't. We try to find an <a> tag.
-                        link_el = card.query_selector('a')
-                        url = link_el.get_attribute('href') if link_el else TARGET_URL
-                        if url and url.startswith('/'):
-                            url = f"https://casinogrounds.com{url}"
-
+                        # URL handling - CasinoGrounds usually wraps the image or title in a link
+                        # but your snippet shows a "GO TO CASINO" link inside.
+                        # We'll use the title as a slug generator or find the specific link.
                         new_batch.append({
                             "title": title,
                             "provider": provider,
-                            "url": url,
+                            "url": TARGET_URL,  # Or find internal link if exists
                             "avatar": avatar,
                             "casino_name": CASINO_NAME
                         })
@@ -99,11 +92,11 @@ def run():
             if new_batch:
                 sync_to_laravel(new_batch)
             else:
-                print("   (No new items found in this view)")
+                print("   (No new items found in current view)")
 
             # 4. Handle "Load More"
-            # CasinoGrounds button often has specific classes or just text
-            load_more = page.locator('button:has-text("Load More"), button:has-text("LOAD MORE")')
+            # The button is often "LOAD MORE" or "Load More"
+            load_more = page.locator('button:has-text("Load More")').first
 
             if load_more.is_visible():
                 print(f"--- Clicking 'Load More' (Seen so far: {len(synced_titles)}) ---")
@@ -111,20 +104,19 @@ def run():
                 time.sleep(1)
                 load_more.click()
 
-                # IMPORTANT: Wait for the network to fetch more items
-                time.sleep(4)
-            else:
-                # One last scroll to be sure
-                page.keyboard.press("End")
+                # Give it time to inject new DOM elements
+                time.sleep(5)
+                # Force a scroll to trigger lazy loading of the new elements
+                page.evaluate("window.scrollBy(0, 1000)")
                 time.sleep(2)
-                if not load_more.is_visible():
-                    print(">>> No 'Load More' button visible. Reached end.")
-                    break
+            else:
+                print(">>> No 'Load More' button found or reached end.")
+                break
 
             if len(synced_titles) > 10000: break
 
         browser.close()
-        print(f"\n>>> Scrape Complete for CasinoGrounds. Total unique: {len(synced_titles)}")
+        print(f"\n>>> Scrape Complete. Total: {len(synced_titles)}")
 
 
 if __name__ == "__main__":
