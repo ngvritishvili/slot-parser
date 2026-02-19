@@ -9,21 +9,24 @@ from playwright_stealth import Stealth
 load_dotenv()
 
 # --- CONFIGURATION ---
-CASINO_NAME = "https://ge.betsson.com"
+CASINO_NAME = "Betsson GE"
 API_ENDPOINT = os.getenv('API_ENDPOINT', 'http://checkthisone.online/api/slots/sync')
 IS_HEADLESS = os.getenv('HEADLESS', 'True').lower() == 'true'
-TARGET_URL = "https://ge.betsson.com/ka/slots"  # Targeted specifically to slots
+TARGET_URL = "https://ge.betsson.com/ka/slots"
 
 
 def sync_to_laravel(slots_data):
     if not slots_data: return False
-    print(f"   [API] Syncing {len(slots_data)} new slots...")
+    print(f"   [API] Syncing {len(slots_data)} slots...")
     try:
         response = requests.post(API_ENDPOINT, json=slots_data, timeout=120)
         if response.status_code == 200:
-            details = response.json().get('details', {})
-            print(
-                f"   [SUCCESS] New: {details.get('new_slots_added')}, Skipped: {details.get('existing_slots_skipped')}")
+            res = response.json()
+            details = res.get('details', {})
+            # FIXED: Matching your Laravel refactor keys
+            new = details.get('new_links_added', 0)
+            skipped = details.get('existing_links_skipped', 0)
+            print(f"   [SUCCESS] New Links: {new}, Skipped: {skipped}")
             return True
     except Exception as e:
         print(f"   [API ERROR] {e}")
@@ -32,72 +35,76 @@ def sync_to_laravel(slots_data):
 
 def run():
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=IS_HEADLESS)
+        browser = p.chromium.launch(headless=IS_HEADLESS, args=["--disable-blink-features=AutomationControlled"])
         context = browser.new_context(viewport={'width': 1920, 'height': 1080})
         page = context.new_page()
         Stealth().apply_stealth_sync(page)
 
-        print(f">>> Opening {TARGET_URL} for {CASINO_NAME}")
-        page.goto(TARGET_URL, wait_until="networkidle", timeout=90000)
+        print(f">>> Opening {TARGET_URL}")
+        try:
+            # FIX 1: Change to domcontentloaded to bypass network timeouts
+            page.goto(TARGET_URL, wait_until="domcontentloaded", timeout=60000)
+            # Explicitly wait for the Angular slot cards to appear
+            page.wait_for_selector('.eb-slot-card-container', timeout=45000)
+        except Exception as e:
+            print(f"!!! Initial load failed or timed out: {e}")
+            page.screenshot(path="betsson_error.png")
+            browser.close()
+            return
 
         synced_titles = set()
-        scroll_attempts = 0
-        max_scroll_attempts = 30  # Stop if no new items after 30 scrolls
+        consecutive_no_new = 0
 
-        while scroll_attempts < max_scroll_attempts:
-            # 1. Wait for Angular slot cards to render
-            page.wait_for_selector('.eb-slot-card-container', timeout=30000)
+        while consecutive_no_new < 15:  # Stop if 15 scrolls yield no new data
+            # 1. Scroll slightly to trigger lazy loading of images/data
+            page.mouse.wheel(0, 1200)
+            time.sleep(2)  # Wait for Angular to render new items
 
-            # 2. Extract slots
+            # 2. Extract slots using the specific classes from your snippet
             items = page.query_selector_all('.eb-slot-card-container')
             new_batch = []
 
             for item in items:
                 try:
-                    # Extract Title from the specific name container
+                    # Title is inside .eb-slot-card-name-container span
                     title_el = item.query_selector('.eb-slot-card-name-container span')
                     title = title_el.inner_text().strip() if title_el else ""
 
                     if title and title not in synced_titles:
-                        # Extract Image from background-image style in the image-container
+                        # Image is in .eb-slot-card-image-container background-image
                         img_div = item.query_selector('.eb-slot-card-image-container')
                         style = img_div.get_attribute('style') if img_div else ""
 
                         avatar = ""
                         if style:
-                            # Matches url("...") or url(...)
                             match = re.search(r'url\(["\']?(.*?)["\']?\)', style)
                             if match:
                                 avatar = match.group(1)
 
                         new_batch.append({
                             "title": title,
-                            "provider": "Betsson",  # Provider usually hidden in a details view/hover
+                            "provider": "Unknown",  # Betsson hides provider in tooltips
                             "url": TARGET_URL,
                             "avatar": avatar,
                             "casino_name": CASINO_NAME
                         })
                         synced_titles.add(title)
-                except Exception as e:
+                except:
                     continue
 
-            # 3. Sync found items
+            # 3. Sync to Laravel
             if new_batch:
                 sync_to_laravel(new_batch)
-                scroll_attempts = 0  # Reset because we found data
+                consecutive_no_new = 0  # Reset counter
             else:
-                scroll_attempts += 1
+                consecutive_no_new += 1
+                print(f"   [INFO] No new items found (Attempt {consecutive_no_new}/15)")
 
-            # 4. Scroll down to trigger Angular lazy loading
-            print(f"--- Scroll Activity: Found {len(new_batch)} new items (Total seen: {len(synced_titles)}) ---")
-            page.evaluate("window.scrollBy(0, 1000)")
-            time.sleep(2.5)  # Wait for cards to pop in
-
-            # Safety break
-            if len(synced_titles) > 5000: break
+            # Safety cap
+            if len(synced_titles) > 8000: break
 
         browser.close()
-        print(f"\n>>> Scrape Complete for Betsson. Total synced: {len(synced_titles)}")
+        print(f"\n>>> Scrape Complete for Betsson. Total unique: {len(synced_titles)}")
 
 
 if __name__ == "__main__":
