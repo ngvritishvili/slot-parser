@@ -1,5 +1,6 @@
 import os
 import time
+import random
 import requests
 from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright
@@ -32,32 +33,33 @@ def perform_login(p):
     browser = p.chromium.launch(headless=IS_HEADLESS)
     context = browser.new_context(
         viewport={'width': 1920, 'height': 1080},
-        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
     )
     page = context.new_page()
     Stealth().apply_stealth_sync(page)
 
     try:
         print(f"    [Navigation] Opening login page...")
-        page.goto("https://sportsbet.io/auth/login", wait_until="domcontentloaded", timeout=60000)
-        page.wait_for_selector('input[name="username"]', timeout=30000)
+        page.goto("https://sportsbet.io/auth/login", wait_until="networkidle", timeout=60000)
 
-        print("    [Action] Entering credentials...")
         page.locator('input[name="username"]').fill(str(USER_LOGIN))
+        page.wait_for_timeout(random.randint(500, 1500))  # Human delay
         page.locator('input[name="password"]').fill(str(USER_PASS))
+
+        print("    [Action] Clicking Sign In...")
         page.locator('button[type="submit"]').click()
 
-        print("    [Verification] Waiting for redirect...")
-        page.wait_for_url(lambda url: "/auth/login" not in url, timeout=25000)
-        page.wait_for_timeout(5000)
+        page.wait_for_url(lambda url: "/auth/login" not in url, timeout=30000)
+        print(f"    [Login] Success. Landed at: {page.url}")
+
+        # VERY IMPORTANT: Stay on the landing page for a bit to look like a real session
+        page.wait_for_timeout(random.randint(5000, 8000))
 
         context.storage_state(path=STATE_FILE)
-        print(f"[Login] SUCCESS! Session saved.")
         browser.close()
         return True
     except Exception as e:
         print(f"[CRITICAL LOGIN ERROR] {e}")
-        page.screenshot(path="login_fail.png")
         browser.close()
         return False
 
@@ -66,50 +68,43 @@ def parse_slot_details(page, slot):
     url = slot.get('url')
     if not url or "sportsbet.io" not in url: return None
 
-    print(f"\n[Scraper] Visiting Slot: {slot.get('title')}")
+    print(f"\n[Scraper] Navigating to: {slot.get('title')}")
     try:
-        # Navigate and wait for basic load
-        page.goto(url, wait_until="domcontentloaded", timeout=60000)
+        # Strategy: Use 'commit' to get there, then wait manually to avoid Cloudflare triggers
+        page.goto(url, wait_until="commit", timeout=60000)
 
-        # Scroll down slightly to trigger lazy-loading of stats
-        page.mouse.wheel(0, 500)
+        # Random long wait to let Cloudflare "cool down"
+        wait_time = random.randint(10000, 15000)
+        print(f"    Waiting {wait_time / 1000}s for Cloudflare/React...")
+        page.wait_for_timeout(wait_time)
 
-        print("    Waiting for Game Stats grid...")
-        try:
-            # We wait for the 'Game stats' header specifically
-            page.wait_for_selector('span[data-translation="casino.game_stats"]', timeout=15000)
-        except Exception as e:
-            # If it fails, take a screenshot of the failure
-            ss_name = f"fail_{slot.get('id')}.png"
-            page.screenshot(path=ss_name)
-            print(f"    [!] Timeout. Screenshot saved as {ss_name}")
+        # Check for Cloudflare challenge on page
+        if "Verify you are human" in page.content():
+            print("    [!] Cloudflare challenge detected. Saving debug image.")
+            page.screenshot(path=f"cloudflare_block_{slot.get('id')}.png")
             return None
 
+        # Scroll to ensure data is in view
+        page.mouse.wheel(0, 600)
         page.wait_for_timeout(2000)
 
         extracted = {"theoretical_rtp": None, "volatility_level": None, "max_win_multiplier": None}
 
-        # RTP Extraction
-        rtp_label = page.query_selector('span[data-translation="casino.rtp"]')
-        if rtp_label:
-            # Look for the value in the neighboring paragraph
-            val_el = page.locator('div:has(> p > span[data-translation="casino.rtp"]) >> p.text-bulma').first
-            if val_el.count() > 0:
-                extracted["theoretical_rtp"] = val_el.inner_text().replace('%', '').strip()
+        # RTP
+        rtp_el = page.locator('div:has(> p > span[data-translation="casino.rtp"]) >> p.text-bulma').first
+        if rtp_el.is_visible():
+            extracted["theoretical_rtp"] = rtp_el.inner_text().replace('%', '').strip()
 
-        # Volatility Extraction
-        vol_label = page.query_selector('span[data-translation="casino.volatility"]')
-        if vol_label:
-            val_span = page.locator(
-                'div:has(> p > span[data-translation="casino.volatility"]) >> span[data-translation*="casino.volatility_"]').first
-            if val_span.count() > 0:
-                key = val_span.get_attribute('data-translation')
-                extracted["volatility_level"] = VOLATILITY_MAP.get(key)
+        # Volatility
+        vol_el = page.locator('span[data-translation*="casino.volatility_"]').first
+        if vol_el.is_visible():
+            key = vol_el.get_attribute('data-translation')
+            extracted["volatility_level"] = VOLATILITY_MAP.get(key)
 
-        print(f"    [Result] {extracted}")
+        print(f"    [Data] {extracted}")
         return extracted
     except Exception as e:
-        print(f"    [Skip] {slot.get('title')} error: {str(e)[:100]}")
+        print(f"    [Error] {str(e)[:50]}")
         return None
 
 
@@ -118,19 +113,14 @@ def run():
     try:
         res = requests.post(API_GET_SLOTS, timeout=20)
         slots = res.json() if res.status_code == 200 else []
-    except Exception as e:
-        print(f"[Error] API Connection failed: {e}")
-        return
-
-    if not slots:
-        print("[Finish] No slots found.")
+    except:
         return
 
     with sync_playwright() as p:
         if not os.path.exists(STATE_FILE):
             if not perform_login(p): return
 
-        print("[Session] Resuming with saved authentication state...")
+        # Launching with stealth and a reused session
         browser = p.chromium.launch(headless=IS_HEADLESS)
         context = browser.new_context(storage_state=STATE_FILE)
         page = context.new_page()
@@ -139,13 +129,12 @@ def run():
         for slot in slots:
             data = parse_slot_details(page, slot)
             if data and any(data.values()):
-                try:
-                    requests.post(API_UPDATE_SLOT, json={"slot_id": slot['id'], **data}, timeout=10)
-                    print(f"    [DB] Updated {slot['title']}")
-                except:
-                    print("    [DB Error] Update failed.")
+                requests.post(API_UPDATE_SLOT, json={"slot_id": slot['id'], **data})
 
-            time.sleep(4)
+            # THE KEY TO CLOUDFLARE: Big randomized breaks between slots
+            sleep_gap = random.randint(15, 30)
+            print(f"[Cooldown] Sleeping for {sleep_gap} seconds...")
+            time.sleep(sleep_gap)
 
         browser.close()
 
