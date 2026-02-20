@@ -29,7 +29,7 @@ VOLATILITY_MAP = {
 
 
 def perform_login(p):
-    print(f"[Login] Initializing browser for {USER_LOGIN}...")
+    print(f"[Login] Initializing fresh login for {USER_LOGIN}...")
     browser = p.chromium.launch(headless=IS_HEADLESS)
     context = browser.new_context(
         viewport={'width': 1920, 'height': 1080},
@@ -39,25 +39,20 @@ def perform_login(p):
     Stealth().apply_stealth_sync(page)
 
     try:
-        print(f"    [Navigation] Opening login page...")
         page.goto("https://sportsbet.io/auth/login", wait_until="networkidle", timeout=60000)
-
-        # Artificial delay before typing
-        page.wait_for_timeout(random.randint(1000, 3000))
+        page.wait_for_timeout(random.randint(2000, 4000))
 
         page.locator('input[name="username"]').fill(str(USER_LOGIN))
         page.wait_for_timeout(random.randint(500, 1500))
         page.locator('input[name="password"]').fill(str(USER_PASS))
-
-        print("    [Action] Clicking Sign In...")
         page.locator('button[type="submit"]').click()
 
         page.wait_for_url(lambda url: "/auth/login" not in url, timeout=30000)
 
-        # --- THE FIX: WAIT AFTER LOGIN ---
-        wait_after_login = random.randint(10000, 15000)
-        print(f"    [Login] Success! Landing page reached. Resting for {wait_after_login / 1000}s...")
-        page.wait_for_timeout(wait_after_login)
+        # Settle after login
+        post_login_wait = random.randint(12000, 15000)
+        print(f"    [Login] Success. Warming up session for {post_login_wait / 1000}s...")
+        page.wait_for_timeout(post_login_wait)
 
         context.storage_state(path=STATE_FILE)
         browser.close()
@@ -74,28 +69,26 @@ def parse_slot_details(page, slot):
 
     print(f"\n[Scraper] Navigating to: {slot.get('title')}")
     try:
-        # Avoid high-speed 'networkidle'; use 'domcontentloaded' or 'commit'
-        page.goto(url, wait_until="domcontentloaded", timeout=60000)
+        # Use 'commit' to get the page moving without waiting for all trackers
+        page.goto(url, wait_until="commit", timeout=60000)
 
-        # Heavy delay to let Cloudflare validation finish in the background
-        wait_time = random.randint(12000, 18000)
-        print(f"    Waiting {wait_time / 1000}s for stats and security...")
+        # Heavy wait to look human and let CF challenges pass
+        wait_time = random.randint(15000, 20000)
+        print(f"    Waiting {wait_time / 1000}s for security/render...")
         page.wait_for_timeout(wait_time)
 
-        # Check for Cloudflare challenge strings in the HTML
-        content = page.content()
-        if "Verify you are human" in content or "cf-challenge" in content:
-            print(f"    [!] Blocked by Cloudflare on {slot.get('title')}")
+        if "Verify you are human" in page.content() or "cf-challenge" in page.content():
+            print(f"    [!] Still blocked by Cloudflare on {slot.get('title')}")
             page.screenshot(path=f"cf_block_{slot.get('id')}.png")
             return None
 
-        # Scroll down to simulate reading the page
-        page.mouse.wheel(0, 600)
-        page.wait_for_timeout(2000)
+        # Scroll to simulate user reading stats
+        page.mouse.wheel(0, 700)
+        page.wait_for_timeout(3000)
 
         extracted = {"theoretical_rtp": None, "volatility_level": None, "max_win_multiplier": None}
 
-        # Data extraction via data-translation keys
+        # Data-translation based selectors
         rtp_el = page.locator('div:has(> p > span[data-translation="casino.rtp"]) >> p.text-bulma').first
         if rtp_el.is_visible():
             extracted["theoretical_rtp"] = rtp_el.inner_text().replace('%', '').strip()
@@ -105,7 +98,7 @@ def parse_slot_details(page, slot):
             key = vol_el.get_attribute('data-translation')
             extracted["volatility_level"] = VOLATILITY_MAP.get(key)
 
-        print(f"    [Data Found] {extracted}")
+        print(f"    [Data] {extracted}")
         return extracted
     except Exception as e:
         print(f"    [Error] {str(e)[:50]}")
@@ -122,15 +115,22 @@ def run():
         return
 
     with sync_playwright() as p:
-        # Handle fresh login if session state is missing
+        # 1. Ensure state file exists
         if not os.path.exists(STATE_FILE):
             if not perform_login(p): return
 
-        print("[Session] Resuming with saved authentication state...")
+        # 2. Main Scraping Session
         browser = p.chromium.launch(headless=IS_HEADLESS)
         context = browser.new_context(storage_state=STATE_FILE)
         page = context.new_page()
         Stealth().apply_stealth_sync(page)
+
+        # --- THE FIX: WARM UP SESSION ON RESUME ---
+        print("[Session] Resuming. Loading dashboard to warm up cookies...")
+        page.goto("https://sportsbet.io/", wait_until="domcontentloaded")
+        warmup = random.randint(10000, 15000)
+        print(f"    Waiting {warmup / 1000}s on dashboard before starting slot loop...")
+        page.wait_for_timeout(warmup)
 
         for slot in slots:
             data = parse_slot_details(page, slot)
@@ -139,11 +139,11 @@ def run():
                     requests.post(API_UPDATE_SLOT, json={"slot_id": slot['id'], **data}, timeout=10)
                     print(f"    [DB] {slot['title']} updated.")
                 except:
-                    print("    [DB Error] Failed to update API.")
+                    print("    [DB Error] Update failed.")
 
-            # Big cooldown between slots to keep the session "warm" but not "robotic"
-            sleep_gap = random.randint(20, 45)
-            print(f"[Cooldown] Resting for {sleep_gap}s before next slot...")
+            # Substantial cooldown between items
+            sleep_gap = random.randint(25, 50)
+            print(f"[Cooldown] Resting for {sleep_gap}s...")
             time.sleep(sleep_gap)
 
         browser.close()
