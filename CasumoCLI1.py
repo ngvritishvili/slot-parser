@@ -15,6 +15,13 @@ IS_HEADLESS = os.getenv('HEADLESS', 'True').lower() == 'true'
 TARGET_URL = "https://www.casumo.com/row/slots/"
 
 
+def slugify(text):
+    """Converts 'Game Name' to 'game-name'"""
+    text = text.lower().strip()
+    text = re.sub(r'[^\w\s-]', '', text)
+    return re.sub(r'[\s_-]+', '-', text)
+
+
 def sync_to_laravel(slots_data):
     if not slots_data: return False
     print(f"   [API] Syncing {len(slots_data)} slots...")
@@ -34,89 +41,86 @@ def sync_to_laravel(slots_data):
 
 def run():
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=IS_HEADLESS, args=["--disable-blink-features=AutomationControlled"])
+        browser = p.chromium.launch(headless=IS_HEADLESS, args=[
+            "--disable-blink-features=AutomationControlled",
+            "--no-sandbox"
+        ])
         context = browser.new_context(viewport={'width': 1920, 'height': 1080})
         page = context.new_page()
         Stealth().apply_stealth_sync(page)
 
         print(f">>> Opening {TARGET_URL}")
         try:
-            # 1. Go to page
+            # Use a more lenient wait
             page.goto(TARGET_URL, wait_until="domcontentloaded", timeout=60000)
 
-            # 2. HANDLE MODALS (Cookies/Age)
-            # Casumo often has an "Accept All" button for cookies
-            time.sleep(3)
-            cookie_btn = page.get_by_role("button", name=re.compile("Accept|Agree|Allow", re.I))
+            # Artificial wait to let React/Next.js hydrate the game grid
+            print("   Waiting for elements to hydrate...")
+            time.sleep(10)
+
+            # Try to accept cookies if they appear
+            cookie_btn = page.locator('button:has-text("Accept"), button:has-text("Allow")').first
             if cookie_btn.is_visible():
-                print("   Accepting cookies...")
                 cookie_btn.click()
                 time.sleep(2)
 
-            # 3. Wait for the game grid using a more relaxed 'attached' state
-            print("   Waiting for game elements...")
-            page.wait_for_selector('[data-testid*="game"]', state="attached", timeout=45000)
         except Exception as e:
-            print(f"!!! Initial Load Failed: {e}")
-            page.screenshot(path="casumo_debug.png")
-            print("   Saved casumo_debug.png for investigation.")
-            browser.close()
-            return
+            print(f"!!! Page load issue: {e}")
 
         synced_titles = set()
 
-        # 4. Vertical scroll loop to find categories
-        for v_scroll in range(20):
-            # Find all potential horizontal scroll containers
-            containers = page.query_selector_all('div.flex.overflow-x-auto')
+        # Vertical loop to discover rows
+        for v_step in range(15):
+            # Target elements that match your snippet: data-testid containing 'game'
+            items = page.query_selector_all('[data-testid*="game"]')
+            new_batch = []
 
-            for container in containers:
+            if not items:
+                print("   [DEBUG] No items found yet, scrolling...")
+
+            for item in items:
                 try:
-                    container.scroll_into_view_if_needed()
+                    img_el = item.query_selector('img')
+                    if not img_el: continue
 
-                    # Inside each row, scroll right
-                    for h_scroll in range(4):
-                        items = container.query_selector_all('[data-testid*="game"]')
-                        new_batch = []
+                    raw_title = img_el.get_attribute('alt') or ""
+                    if not raw_title or raw_title in synced_titles:
+                        continue
 
-                        for item in items:
-                            try:
-                                img_el = item.query_selector('img')
-                                title = img_el.get_attribute('alt') if img_el else ""
+                    # 1. URL Generation: https://www.casumo.com/row/play/game-name/
+                    game_slug = slugify(raw_title)
+                    game_url = f"https://www.casumo.com/row/play/{game_slug}/"
 
-                                if title and title not in synced_titles:
-                                    avatar = img_el.get_attribute('src') or ""
-                                    provider_el = item.query_selector('.bg-purple-60')
-                                    provider = provider_el.inner_text().strip() if provider_el else "Unknown"
+                    # 2. Avatar extraction
+                    avatar = img_el.get_attribute('src') or ""
 
-                                    new_batch.append({
-                                        "title": title,
-                                        "provider": provider,
-                                        "url": TARGET_URL,
-                                        "avatar": avatar,
-                                        "casino_name": CASINO_NAME
-                                    })
-                                    synced_titles.add(title)
-                            except:
-                                continue
+                    # 3. Provider extraction from the purple div
+                    provider_el = item.query_selector('.bg-purple-60')
+                    provider = provider_el.inner_text().strip() if provider_el else "Unknown"
 
-                        if new_batch:
-                            sync_to_laravel(new_batch)
-
-                        # Slide the row right
-                        page.evaluate("(el) => el.scrollBy(1000, 0)", container)
-                        time.sleep(1)
+                    new_batch.append({
+                        "title": raw_title,
+                        "provider": provider,
+                        "url": game_url,
+                        "avatar": avatar,
+                        "casino_name": CASINO_NAME
+                    })
+                    synced_titles.add(raw_title)
                 except:
                     continue
 
-            # Move the whole page down
-            page.mouse.wheel(0, 1500)
-            time.sleep(2)
+            if new_batch:
+                sync_to_laravel(new_batch)
+
+            # Scroll to trigger more content
+            # Horizontal rows usually load more when the page moves or row is interacted with
+            page.mouse.wheel(0, 1000)
+            time.sleep(3)
 
             if len(synced_titles) > 10000: break
 
         browser.close()
-        print(f"\n>>> Scrape Complete for Casumo. Total unique: {len(synced_titles)}")
+        print(f"\n>>> Scrape Complete. Total unique: {len(synced_titles)}")
 
 
 if __name__ == "__main__":
