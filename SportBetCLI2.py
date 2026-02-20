@@ -22,57 +22,53 @@ VOLATILITY_MAP = {"low": 1, "medium": 2, "high": 3, "very high": 4}
 
 
 def perform_login(p):
-    print(f"[Login] Directing to login page for {USER_LOGIN}...")
-    # Launch with a realistic user agent
+    print(f"[Login] Using direct form element mapping for {USER_LOGIN}...")
     browser = p.chromium.launch(headless=IS_HEADLESS)
     context = browser.new_context(
         viewport={'width': 1920, 'height': 1080},
-        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
     )
     page = context.new_page()
     Stealth().apply_stealth_sync(page)
 
     try:
-        # GO DIRECTLY TO LOGIN PAGE
-        print("    Navigating directly to: https://sportsbet.io/auth/login")
+        # Step 1: Go to login page
+        print("    Navigating to https://sportsbet.io/auth/login")
         page.goto("https://sportsbet.io/auth/login", wait_until="networkidle", timeout=60000)
 
-        # Wait for the form fields to be visible
-        # We try both name attributes and placeholders as fallbacks
-        print("    Waiting for input fields...")
-        page.wait_for_selector('input[name="username"], input[placeholder*="Username"]', timeout=30000)
+        # Step 2: Fill inputs using the specific names from your HTML
+        print("    Waiting for form elements...")
+        # Target: name="username" and name="password"
+        page.wait_for_selector('input[name="username"]', timeout=20000)
 
-        # Fill credentials
-        print("    Filling form...")
-        # Locating specifically by name or placeholder to avoid confusion
-        page.locator('input[name="username"], input[placeholder*="Username"]').fill(USER_LOGIN)
-        page.locator('input[name="password"], input[placeholder*="Password"]').fill(USER_PASS)
+        print("    Filling Username and Password...")
+        page.fill('input[name="username"]', USER_LOGIN)
+        page.fill('input[name="password"]', USER_PASS)
 
-        # Click the Sign In button
-        # Using the brand button class you provided earlier
-        print("    Clicking Sign In...")
-        submit_btn = page.locator('button[type="submit"].button-brand, button:has-text("Sign in")').first
-        submit_btn.click()
+        # Step 3: Click the Submit button
+        # Target: type="submit" with class "bg-piccolo" as seen in your code
+        print("    Clicking 'Sign In' button...")
+        page.click('button[type="submit"]')
 
-        # Give it time to process and redirect
-        print("    Waiting for session verification...")
+        # Step 4: Verification
+        print("    Waiting for redirect...")
         page.wait_for_timeout(10000)
 
-        # Verify if we are still on the login page
+        # If the URL still contains 'auth/login', it failed
         if "/auth/login" in page.url:
-            print(f"    [!] Still on login page ({page.url}). Check login_error.png")
-            page.screenshot(path="login_error.png")
+            print(f"    [!] Login failed. Current URL: {page.url}")
+            page.screenshot(path="login_failed_check.png")
             return False
 
-        # Save the authenticated state (cookies/localstorage)
+        # Save session
         context.storage_state(path=STATE_FILE)
-        print("[Login] Success! Session saved to state.json.")
+        print("[Login] Success! State saved.")
         browser.close()
         return True
 
     except Exception as e:
         print(f"[Login Error] {e}")
-        page.screenshot(path="login_crash_debug.png")
+        page.screenshot(path="login_crash.png")
         browser.close()
         return False
 
@@ -84,13 +80,12 @@ def parse_slot_details(page, slot):
 
     print(f"\n[Scraping] {slot.get('title')}")
     try:
-        # Navigate to the specific slot page
         page.goto(url, wait_until="domcontentloaded", timeout=60000)
-        page.wait_for_timeout(5000)  # Wait for details to load
+        page.wait_for_timeout(5000)
 
         extracted = {"theoretical_rtp": None, "volatility_level": None, "max_win_multiplier": None}
 
-        # Select the stat blocks (RTP, Volatility, etc.)
+        # Select the stat blocks (flex layout)
         blocks = page.query_selector_all('div.flex-col.justify-between.md\\:items-center')
         for block in blocks:
             label_el = block.query_selector('span.text-secondary')
@@ -109,30 +104,28 @@ def parse_slot_details(page, slot):
         print(f"    Data: {extracted}")
         return extracted
     except Exception as e:
-        print(f"    Error on slot {slot.get('title')}: {str(e)[:50]}")
+        print(f"    Page Error: {str(e)[:50]}")
         return None
 
 
 def run():
-    print(f"[DB] Fetching slots for casino_id: {CASINO_ID}...")
+    print(f"[DB] Fetching slots for casino {CASINO_ID}...")
     try:
         response = requests.post(API_GET_SLOTS, timeout=30)
         slots = response.json() if response.status_code == 200 else []
     except Exception as e:
-        print(f"Failed to fetch slots from DB: {e}")
+        print(f"API Error: {e}")
         return
 
     if not slots:
-        print("No slots found to process.")
+        print("No slots to process.")
         return
 
     with sync_playwright() as p:
-        # Step 1: Login if state doesn't exist
         if not os.path.exists(STATE_FILE):
             if not perform_login(p):
                 return
 
-        # Step 2: Run the scraping with the saved session
         browser = p.chromium.launch(headless=IS_HEADLESS)
         context = browser.new_context(storage_state=STATE_FILE)
         page = context.new_page()
@@ -141,16 +134,9 @@ def run():
         for slot in slots:
             data = parse_slot_details(page, slot)
             if data and any(data.values()):
-                # Send data back to your API
-                try:
-                    update_resp = requests.post(API_UPDATE_SLOT, json={"slot_id": slot['id'], **data})
-                    if update_resp.status_code == 200:
-                        print(f"    [DB] Updated {slot['title']} successfully.")
-                except Exception as e:
-                    print(f"    [DB Error] Failed to update: {e}")
+                requests.post(API_UPDATE_SLOT, json={"slot_id": slot['id'], **data})
 
-            # Anti-detection delay
-            time.sleep(3)
+            time.sleep(2)
 
         browser.close()
 
