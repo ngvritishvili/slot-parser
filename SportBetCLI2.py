@@ -42,18 +42,22 @@ def perform_login(p):
         print(f"    [Navigation] Opening login page...")
         page.goto("https://sportsbet.io/auth/login", wait_until="networkidle", timeout=60000)
 
+        # Artificial delay before typing
+        page.wait_for_timeout(random.randint(1000, 3000))
+
         page.locator('input[name="username"]').fill(str(USER_LOGIN))
-        page.wait_for_timeout(random.randint(500, 1500))  # Human delay
+        page.wait_for_timeout(random.randint(500, 1500))
         page.locator('input[name="password"]').fill(str(USER_PASS))
 
         print("    [Action] Clicking Sign In...")
         page.locator('button[type="submit"]').click()
 
         page.wait_for_url(lambda url: "/auth/login" not in url, timeout=30000)
-        print(f"    [Login] Success. Landed at: {page.url}")
 
-        # VERY IMPORTANT: Stay on the landing page for a bit to look like a real session
-        page.wait_for_timeout(random.randint(5000, 8000))
+        # --- THE FIX: WAIT AFTER LOGIN ---
+        wait_after_login = random.randint(10000, 15000)
+        print(f"    [Login] Success! Landing page reached. Resting for {wait_after_login / 1000}s...")
+        page.wait_for_timeout(wait_after_login)
 
         context.storage_state(path=STATE_FILE)
         browser.close()
@@ -70,38 +74,38 @@ def parse_slot_details(page, slot):
 
     print(f"\n[Scraper] Navigating to: {slot.get('title')}")
     try:
-        # Strategy: Use 'commit' to get there, then wait manually to avoid Cloudflare triggers
-        page.goto(url, wait_until="commit", timeout=60000)
+        # Avoid high-speed 'networkidle'; use 'domcontentloaded' or 'commit'
+        page.goto(url, wait_until="domcontentloaded", timeout=60000)
 
-        # Random long wait to let Cloudflare "cool down"
-        wait_time = random.randint(10000, 15000)
-        print(f"    Waiting {wait_time / 1000}s for Cloudflare/React...")
+        # Heavy delay to let Cloudflare validation finish in the background
+        wait_time = random.randint(12000, 18000)
+        print(f"    Waiting {wait_time / 1000}s for stats and security...")
         page.wait_for_timeout(wait_time)
 
-        # Check for Cloudflare challenge on page
-        if "Verify you are human" in page.content():
-            print("    [!] Cloudflare challenge detected. Saving debug image.")
-            page.screenshot(path=f"cloudflare_block_{slot.get('id')}.png")
+        # Check for Cloudflare challenge strings in the HTML
+        content = page.content()
+        if "Verify you are human" in content or "cf-challenge" in content:
+            print(f"    [!] Blocked by Cloudflare on {slot.get('title')}")
+            page.screenshot(path=f"cf_block_{slot.get('id')}.png")
             return None
 
-        # Scroll to ensure data is in view
+        # Scroll down to simulate reading the page
         page.mouse.wheel(0, 600)
         page.wait_for_timeout(2000)
 
         extracted = {"theoretical_rtp": None, "volatility_level": None, "max_win_multiplier": None}
 
-        # RTP
+        # Data extraction via data-translation keys
         rtp_el = page.locator('div:has(> p > span[data-translation="casino.rtp"]) >> p.text-bulma').first
         if rtp_el.is_visible():
             extracted["theoretical_rtp"] = rtp_el.inner_text().replace('%', '').strip()
 
-        # Volatility
         vol_el = page.locator('span[data-translation*="casino.volatility_"]').first
         if vol_el.is_visible():
             key = vol_el.get_attribute('data-translation')
             extracted["volatility_level"] = VOLATILITY_MAP.get(key)
 
-        print(f"    [Data] {extracted}")
+        print(f"    [Data Found] {extracted}")
         return extracted
     except Exception as e:
         print(f"    [Error] {str(e)[:50]}")
@@ -114,13 +118,15 @@ def run():
         res = requests.post(API_GET_SLOTS, timeout=20)
         slots = res.json() if res.status_code == 200 else []
     except:
+        print("[Error] DB API Offline")
         return
 
     with sync_playwright() as p:
+        # Handle fresh login if session state is missing
         if not os.path.exists(STATE_FILE):
             if not perform_login(p): return
 
-        # Launching with stealth and a reused session
+        print("[Session] Resuming with saved authentication state...")
         browser = p.chromium.launch(headless=IS_HEADLESS)
         context = browser.new_context(storage_state=STATE_FILE)
         page = context.new_page()
@@ -129,11 +135,15 @@ def run():
         for slot in slots:
             data = parse_slot_details(page, slot)
             if data and any(data.values()):
-                requests.post(API_UPDATE_SLOT, json={"slot_id": slot['id'], **data})
+                try:
+                    requests.post(API_UPDATE_SLOT, json={"slot_id": slot['id'], **data}, timeout=10)
+                    print(f"    [DB] {slot['title']} updated.")
+                except:
+                    print("    [DB Error] Failed to update API.")
 
-            # THE KEY TO CLOUDFLARE: Big randomized breaks between slots
-            sleep_gap = random.randint(15, 30)
-            print(f"[Cooldown] Sleeping for {sleep_gap} seconds...")
+            # Big cooldown between slots to keep the session "warm" but not "robotic"
+            sleep_gap = random.randint(20, 45)
+            print(f"[Cooldown] Resting for {sleep_gap}s before next slot...")
             time.sleep(sleep_gap)
 
         browser.close()
