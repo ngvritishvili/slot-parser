@@ -16,9 +16,8 @@ API_UPDATE_SLOT = f"{API_BASE}/api/slots/update-details"
 IS_HEADLESS = os.getenv('HEADLESS', 'True').lower() == 'true'
 STATE_FILE = "state.json"
 
-# Credentials for Sportsbet.io
-USER_LOGIN = os.getenv('CASINO_USER')  # Your username/email
-USER_PASS = os.getenv('CASINO_PASS')  # Your password
+USER_LOGIN = os.getenv('CASINO_USER')
+USER_PASS = os.getenv('CASINO_PASS')
 
 VOLATILITY_MAP = {"low": 1, "medium": 2, "high": 3, "very high": 4}
 
@@ -47,50 +46,71 @@ def update_slot_in_db(slot_id, data):
 
 
 def perform_login(p):
-    """Logs into Sportsbet.io and saves the state to state.json"""
     print(f"[Login] Attempting login for {USER_LOGIN}...")
     browser = p.chromium.launch(headless=IS_HEADLESS)
-    context = browser.new_context(viewport={'width': 1920, 'height': 1080})
+
+    # Adding more realistic headers
+    context = browser.new_context(
+        viewport={'width': 1920, 'height': 1080},
+        extra_http_headers={"Accept-Language": "en-US,en;q=0.9"}
+    )
+
     page = context.new_page()
     Stealth().apply_stealth_sync(page)
 
     try:
-        page.goto("https://sportsbet.io/", wait_until="networkidle")
+        # 1. Try to go to the login page directly if possible, or use home with a longer timeout
+        print("    Navigating to Sportsbet.io...")
+        # We use 'domcontentloaded' because 'networkidle' is too strict for crypto sites
+        page.goto("https://sportsbet.io/", wait_until="domcontentloaded", timeout=90000)
 
-        # Click the Sign In button (using text-based selector as it's more stable)
+        # 2. Look for the Sign In button
+        print("    Opening Login Modal...")
+        page.wait_for_selector('button:has-text("Sign in")', timeout=20000)
         page.click('button:has-text("Sign in")')
 
-        # Fill credentials
+        # 3. Fill credentials (Wait for form to appear)
+        page.wait_for_selector('input[name="username"]', timeout=10000)
         page.fill('input[name="username"]', USER_LOGIN)
         page.fill('input[name="password"]', USER_PASS)
 
-        # Click Login button
+        # 4. Submit
+        print("    Submitting credentials...")
         page.click('button[type="submit"]')
 
-        # Wait for the URL to change or a logout button to appear to confirm success
+        # 5. Wait to see if login successful (e.g., look for user profile or a specific element)
         page.wait_for_timeout(10000)
 
-        # Save cookies and local storage
+        # Check if we are still on login (failed login/captcha)
+        if page.query_selector('button[type="submit"]'):
+            print("    [!] Login form still visible. Possibly failed or Captcha appeared.")
+            page.screenshot(path="login_failed.png")
+            return False
+
+        # Save session
         context.storage_state(path=STATE_FILE)
-        print("[Login] Success! Session saved to state.json")
+        print("[Login] Success! Session saved.")
         browser.close()
         return True
     except Exception as e:
-        print(f"[Login Error] Could not log in: {e}")
-        page.screenshot(path="login_error.png")
+        print(f"[Login Error] {e}")
+        page.screenshot(path="login_timeout_debug.png")
         browser.close()
         return False
 
 
 def parse_slot_details(page, slot):
     url = slot.get('url')
+    # Filter out BC.Game URLs if they accidentally got into the Sportsbet list
+    if "sportsbet.io" not in url:
+        print(f"    [SKIP] Invalid URL for this scraper: {url}")
+        return None
+
     print(f"\n--- [Scraping] {slot.get('title')} ---")
 
     try:
-        # Increase timeout and wait for idle network
-        page.goto(url, wait_until="networkidle", timeout=60000)
-
-        # Extra wait for the stats bar to render after the page 'load'
+        # Use domcontentloaded here too for speed
+        page.goto(url, wait_until="domcontentloaded", timeout=60000)
         page.wait_for_timeout(5000)
 
         extracted = {
@@ -99,16 +119,8 @@ def parse_slot_details(page, slot):
             "max_win_multiplier": None
         }
 
-        # The selectors for the detail blocks
+        # Handle the technical info blocks
         blocks = page.query_selector_all('div.flex-col.justify-between.md\\:items-center')
-
-        if not blocks:
-            # Fallback debug: check if we are still seeing a login button
-            if page.query_selector('button:has-text("Sign in")'):
-                print("    [!] Error: Session expired or not logged in.")
-            else:
-                print("    [!] Error: Could not find technical info blocks.")
-            page.screenshot(path=f"debug_{slot['id']}.png")
 
         for block in blocks:
             label_el = block.query_selector('span.text-secondary')
@@ -117,7 +129,6 @@ def parse_slot_details(page, slot):
             if label_el and value_el:
                 label = label_el.inner_text().strip().lower()
                 value = value_el.inner_text().strip()
-                print(f"    [FOUND] {label}: {value}")
 
                 if "rtp" in label:
                     extracted["theoretical_rtp"] = value.replace('%', '')
@@ -125,6 +136,11 @@ def parse_slot_details(page, slot):
                     extracted["volatility_level"] = VOLATILITY_MAP.get(value.lower())
                 elif "max win" in label:
                     extracted["max_win_multiplier"] = value.upper().replace('X', '')
+
+        if any(extracted.values()):
+            print(f"    [FOUND] {extracted}")
+        else:
+            print("    [!] No data found on this page.")
 
         return extracted
     except Exception as e:
@@ -135,16 +151,14 @@ def parse_slot_details(page, slot):
 def run():
     slots = get_slots_to_process()
     if not slots:
-        print("No slots to process.")
         return
 
     with sync_playwright() as p:
-        # 1. Login if we don't have a saved session
         if not os.path.exists(STATE_FILE):
             if not perform_login(p):
+                print("Aborting: Could not establish session.")
                 return
 
-        # 2. Start scraping with the saved session
         browser = p.chromium.launch(headless=IS_HEADLESS)
         context = browser.new_context(
             storage_state=STATE_FILE,
