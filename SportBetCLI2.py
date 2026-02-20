@@ -18,13 +18,12 @@ STATE_FILE = "state.json"
 USER_LOGIN = os.getenv('CASINO_USER')
 USER_PASS = os.getenv('CASINO_PASS')
 
-# Mapping updated to match the translation keys in your HTML
 VOLATILITY_MAP = {
-    "casino.volatility_1": 1,  # Low
-    "casino.volatility_2": 2,  # Low-Medium
-    "casino.volatility_3": 3,  # Medium
-    "casino.volatility_4": 4,  # Medium-High
-    "casino.volatility_5": 5  # High
+    "casino.volatility_1": 1,
+    "casino.volatility_2": 2,
+    "casino.volatility_3": 3,
+    "casino.volatility_4": 4,
+    "casino.volatility_5": 5
 }
 
 
@@ -58,6 +57,7 @@ def perform_login(p):
         return True
     except Exception as e:
         print(f"[CRITICAL LOGIN ERROR] {e}")
+        page.screenshot(path="login_fail.png")
         browser.close()
         return False
 
@@ -68,52 +68,48 @@ def parse_slot_details(page, slot):
 
     print(f"\n[Scraper] Visiting Slot: {slot.get('title')}")
     try:
+        # Navigate and wait for basic load
         page.goto(url, wait_until="domcontentloaded", timeout=60000)
 
-        # Increased wait because "Game Stats" often load via a separate API call
+        # Scroll down slightly to trigger lazy-loading of stats
+        page.mouse.wheel(0, 500)
+
         print("    Waiting for Game Stats grid...")
-        page.wait_for_selector('span[data-translation="casino.game_stats"]', timeout=15000)
-        page.wait_for_timeout(2000)  # Small buffer for numbers to tick up
+        try:
+            # We wait for the 'Game stats' header specifically
+            page.wait_for_selector('span[data-translation="casino.game_stats"]', timeout=15000)
+        except Exception as e:
+            # If it fails, take a screenshot of the failure
+            ss_name = f"fail_{slot.get('id')}.png"
+            page.screenshot(path=ss_name)
+            print(f"    [!] Timeout. Screenshot saved as {ss_name}")
+            return None
 
-        extracted = {
-            "theoretical_rtp": None,
-            "volatility_level": None,
-            "max_win_multiplier": None
-        }
+        page.wait_for_timeout(2000)
 
-        # 1. Get RTP (the one next to 'casino.rtp')
+        extracted = {"theoretical_rtp": None, "volatility_level": None, "max_win_multiplier": None}
+
+        # RTP Extraction
         rtp_label = page.query_selector('span[data-translation="casino.rtp"]')
         if rtp_label:
-            # The value is usually the next paragraph/span in the sibling container
-            # Based on your HTML: <p>RTP</p> <p>96.5%</p>
-            parent = rtp_label.evaluate_handle("el => el.closest('div')")
-            val_el = parent.query_selector('p.text-bulma, span.text-bulma')
-            if val_el:
+            # Look for the value in the neighboring paragraph
+            val_el = page.locator('div:has(> p > span[data-translation="casino.rtp"]) >> p.text-bulma').first
+            if val_el.count() > 0:
                 extracted["theoretical_rtp"] = val_el.inner_text().replace('%', '').strip()
 
-        # 2. Get Volatility
+        # Volatility Extraction
         vol_label = page.query_selector('span[data-translation="casino.volatility"]')
         if vol_label:
-            parent = vol_label.evaluate_handle("el => el.closest('div')")
-            # Volatility value is inside another span with a translation key
-            val_span = parent.query_selector('span[data-translation*="casino.volatility_"]')
-            if val_span:
+            val_span = page.locator(
+                'div:has(> p > span[data-translation="casino.volatility"]) >> span[data-translation*="casino.volatility_"]').first
+            if val_span.count() > 0:
                 key = val_span.get_attribute('data-translation')
                 extracted["volatility_level"] = VOLATILITY_MAP.get(key)
-
-        # 3. Get Max Win (Sportbet often shows this in 'Min - Max bet' or 'Max win' labels)
-        # Note: If Max Win is not in the Game Stats grid, we might need a backup selector.
-        max_win_label = page.query_selector('span[data-translation="casino.max_win"]')
-        if max_win_label:
-            parent = max_win_label.evaluate_handle("el => el.closest('div')")
-            val_el = parent.query_selector('p.text-bulma, span.text-bulma')
-            if val_el:
-                extracted["max_win_multiplier"] = val_el.inner_text().lower().replace('x', '').replace(',', '').strip()
 
         print(f"    [Result] {extracted}")
         return extracted
     except Exception as e:
-        print(f"    [Skip] {slot.get('title')} error: {str(e)[:50]}")
+        print(f"    [Skip] {slot.get('title')} error: {str(e)[:100]}")
         return None
 
 
