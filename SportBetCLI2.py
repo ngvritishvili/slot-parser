@@ -38,34 +38,40 @@ def perform_login(p):
         page.goto("https://sportsbet.io/auth/login", wait_until="domcontentloaded", timeout=60000)
 
         print("    [Navigation] Waiting for form fields...")
+        # Waiting for the specific input name from your HTML snippet
         page.wait_for_selector('input[name="username"]', timeout=30000)
 
         print("    [Action] Entering credentials...")
-        # Fixed the page.fill syntax here
-        page.fill('input[name="username"]', USER_LOGIN)
-        page.fill('input[name="password"]', USER_PASS)
+        # Using the locator pattern to ensure 'value' argument is correctly mapped
+        page.locator('input[name="username"]').fill(str(USER_LOGIN))
+        page.locator('input[name="password"]').fill(str(USER_PASS))
 
         time.sleep(1)
 
         print("    [Action] Clicking Sign In button...")
-        page.click('button[type="submit"]')
+        # Use the submit type button found in your HTML snippet
+        page.locator('button[type="submit"]').click()
 
         print("    [Verification] Waiting for dashboard redirect...")
-        # Wait up to 20 seconds for the URL to no longer be the login page
-        page.wait_for_url(lambda url: "/auth/login" not in url, timeout=20000)
+        # We wait for the URL to change, indicating a successful login redirect
+        page.wait_for_url(lambda url: "/auth/login" not in url, timeout=25000)
 
-        # Additional pause to let cookies settle
+        # Give the session a moment to settle
         page.wait_for_timeout(5000)
 
-        # Save session cookies and storage
+        # Save cookies/session for the main scraper loop
         context.storage_state(path=STATE_FILE)
-        print(f"[Login] SUCCESS! Redirected to: {page.url}")
+        print(f"[Login] SUCCESS! Currently at: {page.url}")
         browser.close()
         return True
 
     except Exception as e:
         print(f"[CRITICAL LOGIN ERROR] {e}")
-        page.screenshot(path="login_crash_debug.png")
+        try:
+            page.screenshot(path="login_error_debug.png")
+            print("    [Debug] Screenshot saved to login_error_debug.png")
+        except:
+            pass
         browser.close()
         return False
 
@@ -77,21 +83,16 @@ def parse_slot_details(page, slot):
 
     print(f"\n[Scraper] Visiting Slot: {slot.get('title')}")
     try:
-        # Navigate to the specific slot URL
         page.goto(url, wait_until="domcontentloaded", timeout=60000)
 
-        # Sportsbet slot pages take a long time to render the stats block
-        print("    Waiting for stats to load...")
+        # SportBet is heavy on JS, so we wait for the stats to actually render
+        print("    Waiting for game information to load...")
         page.wait_for_timeout(8000)
 
         extracted = {"theoretical_rtp": None, "volatility_level": None, "max_win_multiplier": None}
 
-        # Look for the stat blocks
+        # Targeted selectors based on the SportBet UI layout
         blocks = page.query_selector_all('div.flex-col.justify-between.md\\:items-center')
-
-        if not blocks:
-            print("    [!] No stat blocks found. Page might not be fully loaded.")
-            # Optional: page.screenshot(path=f"debug_{slot['id']}.png")
 
         for block in blocks:
             label_el = block.query_selector('span.text-secondary')
@@ -101,11 +102,12 @@ def parse_slot_details(page, slot):
                 label = label_el.inner_text().lower()
                 val = value_el.inner_text().strip()
                 if "rtp" in label:
+                    # Extracts '96.5' from '96.5%'
                     extracted["theoretical_rtp"] = val.replace('%', '').strip()
                 elif "volatility" in label:
                     extracted["volatility_level"] = VOLATILITY_MAP.get(val.lower())
                 elif "max win" in label:
-                    # Clean up '10,000x' -> '10000'
+                    # Clean up '5,000x' -> '5000'
                     extracted["max_win_multiplier"] = val.lower().replace('x', '').replace(',', '').strip()
 
         print(f"    [Result] {extracted}")
@@ -118,6 +120,7 @@ def parse_slot_details(page, slot):
 def run():
     print(f"[Start] Casino ID: {CASINO_ID}")
     try:
+        # Fetch slots from your internal API
         res = requests.post(API_GET_SLOTS, timeout=20)
         slots = res.json() if res.status_code == 200 else []
     except Exception as e:
@@ -125,17 +128,16 @@ def run():
         return
 
     if not slots:
-        print("[Finish] No slots found in database.")
+        print("[Finish] No slots found.")
         return
 
     with sync_playwright() as p:
-        # 1. Login once to get the state.json
+        # Check if we have a valid session, otherwise login
         if not os.path.exists(STATE_FILE):
             if not perform_login(p):
                 return
 
-        # 2. Start the actual scraping session
-        print("[Session] Resuming with saved state...")
+        print("[Session] Resuming with saved authentication state...")
         browser = p.chromium.launch(headless=IS_HEADLESS)
         context = browser.new_context(storage_state=STATE_FILE)
         page = context.new_page()
@@ -147,11 +149,11 @@ def run():
                 try:
                     update_resp = requests.post(API_UPDATE_SLOT, json={"slot_id": slot['id'], **data}, timeout=10)
                     if update_resp.status_code == 200:
-                        print(f"    [DB] Successfully updated {slot['title']}")
+                        print(f"    [DB] Updated {slot['title']} successfully.")
                 except:
-                    print("    [DB Error] Update request failed.")
+                    print("    [DB Error] Could not reach update API.")
 
-            # Anti-bot sleep
+            # Throttle requests to avoid rate limiting
             time.sleep(4)
 
         browser.close()
