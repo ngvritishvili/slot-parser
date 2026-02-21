@@ -17,8 +17,8 @@ IS_HEADLESS = os.getenv('HEADLESS', 'True').lower() == 'true'
 STATE_FILE = "stake_state.json"
 
 # Ensure these keys are in your .env file
-USER_LOGIN = os.getenv('STAKE_USER')
-USER_PASS = os.getenv('STAKE_PASS')
+USER_LOGIN = os.getenv('CASINO_USER')
+USER_PASS = os.getenv('CASINO_PASS')
 
 VOLATILITY_MAP = {
     "low": 1,
