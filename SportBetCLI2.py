@@ -9,7 +9,7 @@ from playwright_stealth import Stealth
 load_dotenv()
 
 # --- CONFIG ---
-CASINO_ID = 1
+CASINO_ID = 2
 API_BASE = os.getenv('API_ENDPOINT_BASE', 'http://checkthisone.online')
 API_GET_SLOTS = f"{API_BASE}/api/casinos/{CASINO_ID}/slots"
 API_UPDATE_SLOT = f"{API_BASE}/api/slots/update-details"
