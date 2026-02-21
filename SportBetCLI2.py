@@ -14,65 +14,59 @@ API_BASE = os.getenv('API_ENDPOINT_BASE', 'http://checkthisone.online')
 API_GET_SLOTS = f"{API_BASE}/api/casinos/{CASINO_ID}/slots"
 API_UPDATE_SLOT = f"{API_BASE}/api/slots/update-details"
 IS_HEADLESS = os.getenv('HEADLESS', 'True').lower() == 'true'
-STATE_FILE = "state.json"
+STATE_FILE = "stake_state.json"
 
-USER_LOGIN = os.getenv('CASINO_USER')
-USER_PASS = os.getenv('CASINO_PASS')
+# Ensure these keys are in your .env file
+USER_LOGIN = os.getenv('STAKE_USER')
+USER_PASS = os.getenv('STAKE_PASS')
 
 VOLATILITY_MAP = {
-    "casino.volatility_1": 1,
-    "casino.volatility_2": 2,
-    "casino.volatility_3": 3,
-    "casino.volatility_4": 4,
-    "casino.volatility_5": 5
+    "low": 1,
+    "medium": 2,
+    "high": 3,
+    "very high": 4
 }
 
 
-def human_click(page, selector):
-    """Calculates element position and moves mouse naturally to click it."""
-    try:
-        element = page.wait_for_selector(selector, timeout=10000)
-        box = element.bounding_box()
-        if box:
-            # Target the center of the element with a slight random offset
-            x = box['x'] + box['width'] / 2 + random.randint(-5, 5)
-            y = box['y'] + box['height'] / 2 + random.randint(-5, 5)
-
-            # Move mouse in small steps to simulate human movement
-            page.mouse.move(x, y, steps=random.randint(5, 10))
-            page.mouse.click(x, y)
-            return True
-    except:
-        return False
-    return False
-
-
 def perform_login(p):
-    print(f"[Login] Initializing fresh login...")
+    if not USER_LOGIN or not USER_PASS:
+        print("[ERROR] STAKE_USER or STAKE_PASS missing in .env file")
+        return False
+
+    print(f"[Login] Opening Stake for {USER_LOGIN}...")
     browser = p.chromium.launch(headless=IS_HEADLESS)
-    context = browser.new_context(viewport={'width': 1920, 'height': 1080})
+    context = browser.new_context(
+        viewport={'width': 1920, 'height': 1080},
+        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    )
     page = context.new_page()
     Stealth().apply_stealth_sync(page)
 
     try:
-        page.goto("https://sportsbet.io/auth/login", wait_until="networkidle")
-        time.sleep(2)
+        # Use domcontentloaded to avoid networkidle timeouts
+        page.goto("https://stake.com/?modal=auth&tab=login", wait_until="domcontentloaded", timeout=60000)
 
-        # Human typing simulation
-        page.locator('input[name="username"]').type(str(USER_LOGIN), delay=random.randint(50, 150))
-        page.locator('input[name="password"]').type(str(USER_PASS), delay=random.randint(50, 150))
+        print("    [Action] Filling credentials...")
+        page.wait_for_selector('input[name="username"]', timeout=20000)
+        page.locator('input[name="username"]').fill(str(USER_LOGIN))
+        page.wait_for_timeout(random.randint(500, 1000))
+        page.locator('input[name="password"]').fill(str(USER_PASS))
 
-        # Click the Sign In button using human coordinates
-        human_click(page, 'button[type="submit"]')
+        print("    [Action] Clicking Login...")
+        # Stake's login button is often a submit type inside the form
+        page.get_by_role("button", name="Login").click()
 
-        page.wait_for_url(lambda url: "/auth/login" not in url, timeout=30000)
-        time.sleep(10)  # Post-login rest
+        # Wait for the modal to disappear or URL to change
+        page.wait_for_url(lambda url: "modal=auth" not in url, timeout=40000)
+        print(f"    [Login] Success. Session active.")
 
+        time.sleep(5)  # Let session settle
         context.storage_state(path=STATE_FILE)
         browser.close()
         return True
     except Exception as e:
         print(f"[CRITICAL LOGIN ERROR] {e}")
+        page.screenshot(path="stake_login_error.png")
         browser.close()
         return False
 
@@ -81,78 +75,94 @@ def parse_slot_details(page, slot):
     url = slot.get('url')
     if not url: return None
 
-    print(f"\n[Scraper] Navigating to: {slot.get('title')}")
+    print(f"\n[Scraper] Visiting: {slot.get('title')}")
     try:
-        # Instead of goto, we can try clicking a link if we were on a list,
-        # but for now, we use goto with a slow 'commit'
-        page.goto(url, wait_until="commit", timeout=60000)
+        # Navigate to the specific slot page
+        page.goto(url, wait_until="domcontentloaded", timeout=60000)
 
-        # Long wait to let the 'Human Verify' pass or fail
-        time.sleep(random.randint(15, 20))
+        # Stake often has an 'i' icon or a 'Game Info' button
+        # We try to click the button that contains "Game Info" or "Description"
+        print("    Searching for 'Game Info' toggle...")
+        time.sleep(4)  # Wait for Svelte to mount
 
-        if "Verify you are human" in page.content():
-            print("    [!] Blocked by Cloudflare. Attempting mouse 'wiggle'...")
-            # Move mouse randomly to see if it triggers the checkbox automatically
-            page.mouse.move(random.randint(100, 500), random.randint(100, 500), steps=20)
-            time.sleep(5)
-            if "Verify you are human" in page.content():
-                return None
-
-        # Human-like scroll
-        for _ in range(3):
-            page.mouse.wheel(0, random.randint(200, 400))
-            time.sleep(1)
+        # Target the button to open the info table
+        # Common selectors: get_by_role("button", name="Game Info")
+        # or clicking the info icon
+        info_toggle = page.get_by_role("button", name="Game info")
+        if info_toggle.is_visible():
+            info_toggle.click()
+            time.sleep(2)
+        else:
+            # Fallback: look for the text directly if already visible
+            if not page.query_selector('tbody.svelte-1ezffp0'):
+                print("    [!] Info table not visible, trying alternative click...")
+                page.keyboard.press("PageDown")  # Sometimes triggers visibility
+                time.sleep(1)
 
         extracted = {"theoretical_rtp": None, "volatility_level": None, "max_win_multiplier": None}
 
-        # Targeted extraction
-        rtp_el = page.locator('div:has(> p > span[data-translation="casino.rtp"]) >> p.text-bulma').first
-        if rtp_el.is_visible():
-            extracted["theoretical_rtp"] = rtp_el.inner_text().replace('%', '').strip()
+        # Parsing the Svelte table provided in your HTML
+        rows = page.query_selector_all('tbody tr')
+        for row in rows:
+            label_cell = row.query_selector('td:first-child')
+            value_cell = row.query_selector('td:last-child')
 
-        vol_el = page.locator('span[data-translation*="casino.volatility_"]').first
-        if vol_el.is_visible():
-            key = vol_el.get_attribute('data-translation')
-            extracted["volatility_level"] = VOLATILITY_MAP.get(key)
+            if label_cell and value_cell:
+                label = label_cell.inner_text().strip().lower()
+                value = value_cell.inner_text().strip()
 
-        print(f"    [Data] {extracted}")
+                if "rtp" == label:
+                    extracted["theoretical_rtp"] = value.replace('%', '').strip()
+                elif "volatility" == label:
+                    extracted["volatility_level"] = VOLATILITY_MAP.get(value.lower())
+                elif "max win" == label:
+                    # '50,000x' -> '50000'
+                    extracted["max_win_multiplier"] = value.lower().replace('x', '').replace(',', '').strip()
+
+        print(f"    [Result] {extracted}")
         return extracted
     except Exception as e:
-        print(f"    [Error] {str(e)[:50]}")
+        print(f"    [Skip] {slot.get('title')} error: {str(e)[:50]}")
         return None
 
 
 def run():
-    print(f"[Start] Casino ID: {CASINO_ID}")
+    print(f"[Start] Stake Scanner (Casino ID: {CASINO_ID})")
     try:
         res = requests.post(API_GET_SLOTS, timeout=20)
         slots = res.json() if res.status_code == 200 else []
-    except:
+    except Exception as e:
+        print(f"[Error] API connection failed: {e}")
+        return
+
+    if not slots:
+        print("[Finish] No slots to process.")
         return
 
     with sync_playwright() as p:
         if not os.path.exists(STATE_FILE):
             if not perform_login(p): return
 
+        # Start scraping with saved session
         browser = p.chromium.launch(headless=IS_HEADLESS)
         context = browser.new_context(storage_state=STATE_FILE)
         page = context.new_page()
         Stealth().apply_stealth_sync(page)
 
-        # WARM UP
-        print("[Session] Warming up on dashboard...")
-        page.goto("https://sportsbet.io/", wait_until="domcontentloaded")
-        time.sleep(15)
+        # Initial landing to verify session
+        page.goto("https://stake.com/casino/slots", wait_until="domcontentloaded")
+        time.sleep(5)
 
         for slot in slots:
             data = parse_slot_details(page, slot)
             if data and any(data.values()):
-                requests.post(API_UPDATE_SLOT, json={"slot_id": slot['id'], **data})
+                try:
+                    requests.post(API_UPDATE_SLOT, json={"slot_id": slot['id'], **data}, timeout=10)
+                    print(f"    [DB] {slot['title']} updated.")
+                except:
+                    print("    [DB Error] API Update failed.")
 
-            # Massive cooldown
-            sleep_gap = random.randint(30, 60)
-            print(f"[Cooldown] Resting for {sleep_gap}s...")
-            time.sleep(sleep_gap)
+            time.sleep(random.randint(4, 7))
 
         browser.close()
 
