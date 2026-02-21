@@ -16,7 +16,7 @@ API_UPDATE_SLOT = f"{API_BASE}/api/slots/update-details"
 IS_HEADLESS = os.getenv('HEADLESS', 'True').lower() == 'true'
 STATE_FILE = "stake_state.json"
 
-# Ensure these keys are in your .env file
+# Using CASINO_USER as per your instruction
 USER_LOGIN = os.getenv('CASINO_USER')
 USER_PASS = os.getenv('CASINO_PASS')
 
@@ -24,49 +24,61 @@ VOLATILITY_MAP = {
     "low": 1,
     "medium": 2,
     "high": 3,
-    "very high": 4
+    "very high": 4,
+    "extreme": 5
 }
 
 
 def perform_login(p):
     if not USER_LOGIN or not USER_PASS:
-        print("[ERROR] STAKE_USER or STAKE_PASS missing in .env file")
+        print("[ERROR] CASINO_USER or CASINO_PASS missing in .env file")
         return False
 
     print(f"[Login] Opening Stake for {USER_LOGIN}...")
     browser = p.chromium.launch(headless=IS_HEADLESS)
     context = browser.new_context(
-        viewport={'width': 1920, 'height': 1080},
+        viewport={'width': 1280, 'height': 800},
         user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
     )
     page = context.new_page()
     Stealth().apply_stealth_sync(page)
 
     try:
-        # Use domcontentloaded to avoid networkidle timeouts
-        page.goto("https://stake.com/?modal=auth&tab=login", wait_until="domcontentloaded", timeout=60000)
+        # 1. Navigate to login modal
+        print("    [Navigation] Loading login page...")
+        page.goto("https://stake.com/?tab=login&modal=auth", wait_until="commit", timeout=60000)
+
+        # 2. Wait for the specific data-testid elements you provided
+        page.wait_for_selector('[data-testid="login-name"]', timeout=30000)
+        page.screenshot(path="debug_login_loaded.png")
 
         print("    [Action] Filling credentials...")
-        page.wait_for_selector('input[name="username"]', timeout=20000)
-        page.locator('input[name="username"]').fill(str(USER_LOGIN))
-        page.wait_for_timeout(random.randint(500, 1000))
-        page.locator('input[name="password"]').fill(str(USER_PASS))
+        # Stake uses 'emailOrName' internally but data-testid is the safest bet
+        page.locator('[data-testid="login-name"]').fill(str(USER_LOGIN))
+        page.wait_for_timeout(random.randint(400, 800))
+        page.locator('[data-testid="login-password"]').fill(str(USER_PASS))
 
-        print("    [Action] Clicking Login...")
-        # Stake's login button is often a submit type inside the form
-        page.get_by_role("button", name="Login").click()
+        page.screenshot(path="debug_login_filled.png")
 
-        # Wait for the modal to disappear or URL to change
-        page.wait_for_url(lambda url: "modal=auth" not in url, timeout=40000)
-        print(f"    [Login] Success. Session active.")
+        print("    [Action] Clicking Sign In...")
+        # Targeted the Sign In button using its testid
+        page.locator('[data-testid="button-login"]').click()
 
-        time.sleep(5)  # Let session settle
+        # 3. Verification
+        print("    [Verification] Waiting for session to establish...")
+        # Wait for the modal to close (it removes modal=auth from URL)
+        page.wait_for_url(lambda url: "modal=auth" not in url, timeout=45000)
+
+        print("    [Login] SUCCESS. Saving state...")
+        time.sleep(5)
         context.storage_state(path=STATE_FILE)
+        page.screenshot(path="debug_login_success.png")
+
         browser.close()
         return True
     except Exception as e:
         print(f"[CRITICAL LOGIN ERROR] {e}")
-        page.screenshot(path="stake_login_error.png")
+        page.screenshot(path="debug_stake_login_crash.png")
         browser.close()
         return False
 
@@ -77,49 +89,45 @@ def parse_slot_details(page, slot):
 
     print(f"\n[Scraper] Visiting: {slot.get('title')}")
     try:
-        # Navigate to the specific slot page
         page.goto(url, wait_until="domcontentloaded", timeout=60000)
 
-        # Stake often has an 'i' icon or a 'Game Info' button
-        # We try to click the button that contains "Game Info" or "Description"
-        print("    Searching for 'Game Info' toggle...")
-        time.sleep(4)  # Wait for Svelte to mount
+        # Stake slots take time to render the 'Game Info' button
+        time.sleep(6)
 
-        # Target the button to open the info table
-        # Common selectors: get_by_role("button", name="Game Info")
-        # or clicking the info icon
-        info_toggle = page.get_by_role("button", name="Game info")
-        if info_toggle.is_visible():
-            info_toggle.click()
+        # Look for the "Game info" button (common on Stake slots)
+        # Based on Svelte structure, we try the text selector first
+        info_btn = page.get_by_role("button", name="Game info")
+        if info_btn.is_visible():
+            info_btn.click()
             time.sleep(2)
         else:
-            # Fallback: look for the text directly if already visible
-            if not page.query_selector('tbody.svelte-1ezffp0'):
-                print("    [!] Info table not visible, trying alternative click...")
-                page.keyboard.press("PageDown")  # Sometimes triggers visibility
-                time.sleep(1)
+            # Try to find any button that might open description
+            page.mouse.wheel(0, 500)
+            time.sleep(1)
 
         extracted = {"theoretical_rtp": None, "volatility_level": None, "max_win_multiplier": None}
 
-        # Parsing the Svelte table provided in your HTML
+        # Parsing the Svelte table
         rows = page.query_selector_all('tbody tr')
+        if not rows:
+            print("    [!] Table not found. Capturing screen.")
+            page.screenshot(path=f"fail_table_{slot.get('id')}.png")
+
         for row in rows:
-            label_cell = row.query_selector('td:first-child')
-            value_cell = row.query_selector('td:last-child')
+            cells = row.query_selector_all('td')
+            if len(cells) >= 2:
+                label = cells[0].inner_text().strip().lower()
+                value = cells[1].inner_text().strip()
 
-            if label_cell and value_cell:
-                label = label_cell.inner_text().strip().lower()
-                value = value_cell.inner_text().strip()
-
-                if "rtp" == label:
+                if "rtp" in label:
                     extracted["theoretical_rtp"] = value.replace('%', '').strip()
-                elif "volatility" == label:
+                elif "volatility" in label:
+                    # Clean 'Very High' -> 'very high'
                     extracted["volatility_level"] = VOLATILITY_MAP.get(value.lower())
-                elif "max win" == label:
-                    # '50,000x' -> '50000'
+                elif "max win" in label:
                     extracted["max_win_multiplier"] = value.lower().replace('x', '').replace(',', '').strip()
 
-        print(f"    [Result] {extracted}")
+        print(f"    [Data] {extracted}")
         return extracted
     except Exception as e:
         print(f"    [Skip] {slot.get('title')} error: {str(e)[:50]}")
@@ -143,15 +151,15 @@ def run():
         if not os.path.exists(STATE_FILE):
             if not perform_login(p): return
 
-        # Start scraping with saved session
+        # Load session
         browser = p.chromium.launch(headless=IS_HEADLESS)
         context = browser.new_context(storage_state=STATE_FILE)
         page = context.new_page()
         Stealth().apply_stealth_sync(page)
 
-        # Initial landing to verify session
+        # Initial rest on dashboard
         page.goto("https://stake.com/casino/slots", wait_until="domcontentloaded")
-        time.sleep(5)
+        time.sleep(10)
 
         for slot in slots:
             data = parse_slot_details(page, slot)
@@ -160,9 +168,10 @@ def run():
                     requests.post(API_UPDATE_SLOT, json={"slot_id": slot['id'], **data}, timeout=10)
                     print(f"    [DB] {slot['title']} updated.")
                 except:
-                    print("    [DB Error] API Update failed.")
+                    print("    [DB Error] Update failed.")
 
-            time.sleep(random.randint(4, 7))
+            # Human-like delay between items
+            time.sleep(random.randint(10, 20))
 
         browser.close()
 
