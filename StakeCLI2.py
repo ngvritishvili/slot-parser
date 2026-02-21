@@ -30,10 +30,10 @@ VOLATILITY_MAP = {
 
 def perform_login(p):
     if not USER_LOGIN or not USER_PASS:
-        print("[ERROR] CASINO_USER or CASINO_PASS missing in .env file")
+        print("[ERROR] CASINO_USER or CASINO_PASS missing in .env")
         return False
 
-    print(f"[Login] Opening Stake for {USER_LOGIN}...")
+    print(f"[Login] Initializing browser for {USER_LOGIN}...")
     browser = p.chromium.launch(headless=IS_HEADLESS)
     context = browser.new_context(
         viewport={'width': 1280, 'height': 800},
@@ -43,60 +43,64 @@ def perform_login(p):
     Stealth().apply_stealth_sync(page)
 
     try:
-        print("    [Navigation] Loading login page...")
-        # Start with a direct hit to the login modal
-        page.goto("https://stake.com/?tab=login&modal=auth", wait_until="commit", timeout=60000)
+        print("    [Navigation] Loading Stake Base...")
+        # Step 1: Go to the main site first
+        page.goto("https://stake.com/", wait_until="commit", timeout=60000)
 
-        # Wait for the form to actually appear
-        page.wait_for_selector('[data-testid="login-name"]', timeout=30000)
+        # Step 2: Manually trigger the login modal via URL to ensure it pops up
+        print("    [Navigation] Triggering Login Modal...")
+        page.goto("https://stake.com/?modal=auth&tab=login", wait_until="domcontentloaded", timeout=60000)
+
+        # Step 3: Wait for the login field with a longer timeout
+        print("    [Action] Waiting for login fields...")
+        try:
+            # We use a combined selector to be safe
+            page.wait_for_selector('input[data-testid="login-name"], input[name="emailOrName"]', timeout=45000)
+        except Exception:
+            print("    [!] Form not found. Saving debug screenshot...")
+            page.screenshot(path="debug_no_form.png")
+            raise Exception("Login form timeout")
 
         print("    [Action] Filling credentials...")
-        page.locator('[data-testid="login-name"]').fill(str(USER_LOGIN))
+        # Use a more flexible selector for the input
+        login_input = page.locator('input[data-testid="login-name"], input[name="emailOrName"]').first
+        pass_input = page.locator('input[data-testid="login-password"], input[name="password"]').first
+
+        login_input.fill(str(USER_LOGIN))
         page.wait_for_timeout(random.randint(500, 1000))
-        page.locator('[data-testid="login-password"]').fill(str(USER_PASS))
+        pass_input.fill(str(USER_PASS))
 
         print("    [Action] Clicking Sign In...")
-        page.locator('[data-testid="button-login"]').click()
+        page.locator('button[data-testid="button-login"], button[type="submit"]').first.click()
 
-        # --- IMPROVED VERIFICATION ---
-        print("    [Verification] Monitoring login progress...")
-
-        # We wait for either the modal to close OR a 2FA field to appear
-        for _ in range(20):  # 20 seconds total check
-            current_url = page.url
-            content = page.content()
-
-            if "modal=auth" not in current_url:
-                print("    [Login] Success! Redirected to dashboard.")
+        # Verification loop
+        print("    [Verification] Waiting for session...")
+        success = False
+        for _ in range(30):
+            if "modal=auth" not in page.url:
+                success = True
                 break
-
-            if "two factor" in content.lower() or "2fa" in content.lower():
-                print("    [!] STOP: 2FA Required. Manual intervention needed.")
-                page.screenshot(path="login_2fa_required.png")
-                return False
-
-            if "verify you are human" in content.lower():
-                print("    [!] STOP: Cloudflare Turnstile detected.")
-                page.screenshot(path="login_cloudflare_detected.png")
-                # Optional: try a tiny mouse move to trigger it
-                page.mouse.move(random.randint(100, 300), random.randint(100, 300))
-
+            # Check for common errors visible on screen
+            content = page.content().lower()
+            if "invalid" in content and "credentials" in content:
+                print("    [Error] Invalid credentials found on page.")
+                break
             time.sleep(1)
 
-        # Final check
-        if "modal=auth" in page.url:
-            print("    [Error] Login timed out or stuck on modal.")
-            page.screenshot(path="debug_login_stuck.png")
+        if success:
+            print("    [Login] Success! Saving state.")
+            time.sleep(5)
+            context.storage_state(path=STATE_FILE)
+            browser.close()
+            return True
+        else:
+            page.screenshot(path="debug_login_failed.png")
+            print("    [Error] Could not verify login success.")
+            browser.close()
             return False
-
-        time.sleep(5)
-        context.storage_state(path=STATE_FILE)
-        browser.close()
-        return True
 
     except Exception as e:
         print(f"[CRITICAL LOGIN ERROR] {e}")
-        page.screenshot(path="debug_stake_crash.png")
         browser.close()
         return False
 
@@ -107,22 +111,26 @@ def parse_slot_details(page, slot):
 
     print(f"\n[Scraper] Visiting: {slot.get('title')}")
     try:
-        page.goto(url, wait_until="domcontentloaded", timeout=60000)
-        time.sleep(6)
+        # Stake pages are heavy; wait for commit then manual delay
+        page.goto(url, wait_until="commit", timeout=60000)
+        time.sleep(8)
 
-        # Scroll down to ensure Svelte components trigger
+        # Scroll to trigger lazy-loaded Svelte elements
         page.mouse.wheel(0, 500)
         time.sleep(2)
 
-        # Look for the "Game info" button
-        info_btn = page.get_by_role("button", name="Game info")
-        if info_btn.is_visible():
-            info_btn.click()
-            time.sleep(2)
+        # Attempt to open the info panel
+        # Trying different variations of the button name
+        for btn_text in ["Game info", "Description", "Game Information"]:
+            info_btn = page.get_by_role("button", name=btn_text, exact=False)
+            if info_btn.is_visible():
+                info_btn.click()
+                time.sleep(2)
+                break
 
         extracted = {"theoretical_rtp": None, "volatility_level": None, "max_win_multiplier": None}
 
-        # Parsing logic for the <tbody> rows
+        # Parsing the specific <tbody> rows from your provided HTML
         rows = page.query_selector_all('tbody tr')
         for row in rows:
             cells = row.query_selector_all('td')
@@ -131,7 +139,6 @@ def parse_slot_details(page, slot):
                 value = cells[1].inner_text().strip()
 
                 if "rtp" == label:
-                    # Clean "96.50%" -> "96.50"
                     extracted["theoretical_rtp"] = value.replace('%', '').strip()
                 elif "volatility" == label:
                     extracted["volatility_level"] = VOLATILITY_MAP.get(value.lower())
@@ -153,6 +160,10 @@ def run():
     except:
         return
 
+    if not slots:
+        print("[Finish] No slots to process.")
+        return
+
     with sync_playwright() as p:
         if not os.path.exists(STATE_FILE):
             if not perform_login(p): return
@@ -162,8 +173,8 @@ def run():
         page = context.new_page()
         Stealth().apply_stealth_sync(page)
 
-        # Warmup
-        page.goto("https://stake.com/casino/slots", wait_until="domcontentloaded")
+        # Warmup on slots page
+        page.goto("https://stake.com/casino/slots", wait_until="commit")
         time.sleep(10)
 
         for slot in slots:
