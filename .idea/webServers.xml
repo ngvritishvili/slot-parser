@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="WebServers">
+    <option name="servers">
+      <webServer id="1921b352-2f1c-4de0-90c3-0d908b640db4" name="remoteParser">
+        <fileTransfer rootFolder="/var/www/slot-parser" accessType="SFTP" host="89.232.33.118" port="5555" sshConfigId="c2358738-cd67-4f9c-8fc4-7047dd4efa0f" sshConfig="slot_admin@89.232.33.118:5555 password">
+          <advancedOptions>
+            <advancedOptions dataProtectionLevel="Private" passiveMode="true" shareSSLContext="true" />
+          </advancedOptions>
+        </fileTransfer>
+      </webServer>
+    </option>
+  </component>
+</project>
