@@ -39,62 +39,74 @@ def perform_login(p):
     Stealth().apply_stealth_sync(page)
 
     try:
-        # Step 1: Base Load
         print("    [Navigation] Loading Stake Base...")
-        page.goto("https://stake.com/", wait_until="commit", timeout=60000)
-        page.screenshot(path="stake_01_base_load.png")
+        page.goto("https://stake.com/?modal=auth&tab=login", wait_until="commit", timeout=60000)
 
-        # Step 2: Trigger Modal
-        print("    [Navigation] Triggering Login Modal...")
-        page.goto("https://stake.com/?modal=auth&tab=login", wait_until="domcontentloaded", timeout=60000)
-        time.sleep(5)  # Extra time for Svelte to mount the modal
-        page.screenshot(path="stake_02_modal_triggered.png")
+        # Wait for the modal to be visible
+        page.wait_for_selector('[data-testid="login-name"]', timeout=45000)
+        page.screenshot(path="stake_01_modal_open.png")
 
-        # Step 3: Wait for Fields
-        print("    [Action] Waiting for login fields...")
+        # Handle the "Accept Cookies" button if it exists (visible in your screenshots)
         try:
-            page.wait_for_selector('input[data-testid="login-name"], input[name="emailOrName"]', timeout=30000)
-        except Exception:
-            print("    [!] Form not found. Saving debug data...")
-            page.screenshot(path="stake_error_form_not_found.png")
-            with open("stake_debug_source.html", "w", encoding="utf-8") as f:
-                f.write(page.content())
-            raise Exception("Login form timeout")
+            cookie_btn = page.get_by_role("button", name="Accept")
+            if cookie_btn.is_visible():
+                print("    [Action] Clearing cookie banner...")
+                cookie_btn.click()
+                time.sleep(1)
+        except:
+            pass
 
         print("    [Action] Filling credentials...")
-        page.locator('input[data-testid="login-name"], input[name="emailOrName"]').first.fill(str(USER_LOGIN))
+        page.locator('[data-testid="login-name"]').fill(str(USER_LOGIN))
         page.wait_for_timeout(random.randint(500, 1000))
-        page.locator('input[data-testid="login-password"], input[name="password"]').first.fill(str(USER_PASS))
-        page.screenshot(path="stake_03_filled.png")
+        page.locator('[data-testid="login-password"]').fill(str(USER_PASS))
+        page.screenshot(path="stake_02_filled.png")
 
         print("    [Action] Clicking Sign In...")
-        page.locator('button[data-testid="button-login"], button[type="submit"]').first.click()
+        # Use a force-click and wait for the click to register
+        submit_btn = page.locator('[data-testid="button-login"]')
+        submit_btn.click()
 
-        # Verification
-        print("    [Verification] Waiting for session...")
+        # --- LONGER WAIT FOR SESSION ---
+        print("    [Verification] Login sent. Waiting 25 seconds for session/redirect...")
+
+        # Instead of just checking URL, we wait for a specific element that exists
+        # only when logged in (like the Wallet or Account menu)
         success = False
-        for i in range(30):
-            if "modal=auth" not in page.url:
+        for i in range(25):
+            # Check if modal is gone OR if user menu is visible
+            current_url = page.url
+            if "modal=auth" not in current_url:
+                print(f"    [Login] URL changed at {i}s. Redirecting...")
                 success = True
                 break
+
+            # Look for 2FA as a fail state
+            if "two factor" in page.content().lower():
+                print("    [!] 2FA Screen detected. Saving screenshot.")
+                page.screenshot(path="stake_error_2fa_manual.png")
+                break
+
             time.sleep(1)
 
         if success:
-            print("    [Login] Success! Saving state.")
-            time.sleep(5)
+            # Crucial: Give it more time to finish loading the dashboard and set cookies
+            print("    [Wait] Stabilizing session (15s extra)...")
+            time.sleep(15)
+
+            page.screenshot(path="stake_03_post_login.png")
             context.storage_state(path=STATE_FILE)
-            page.screenshot(path="stake_04_success.png")
+            print("    [Login] Success! State saved.")
             browser.close()
             return True
         else:
-            page.screenshot(path="stake_error_login_failed.png")
-            print("    [Error] Stuck on login modal.")
+            page.screenshot(path="stake_error_stuck.png")
+            print("    [Error] Login timed out or redirected improperly.")
             browser.close()
             return False
 
     except Exception as e:
         print(f"[CRITICAL LOGIN ERROR] {e}")
-        page.screenshot(path="stake_critical_crash.png")
         browser.close()
         return False
 
@@ -106,23 +118,20 @@ def parse_slot_details(page, slot):
     print(f"\n[Scraper] Visiting: {slot.get('title')}")
     try:
         page.goto(url, wait_until="commit", timeout=60000)
-        time.sleep(8)
+        # Give Stake slots more time; they have heavy animations
+        time.sleep(12)
+
         page.mouse.wheel(0, 500)
         time.sleep(2)
 
-        # Attempt to find the info table
-        for btn_text in ["Game info", "Description", "Game Information"]:
-            info_btn = page.get_by_role("button", name=btn_text, exact=False)
-            if info_btn.is_visible():
-                info_btn.click()
-                time.sleep(2)
-                break
+        # Attempt to open the info panel
+        info_btn = page.get_by_role("button", name="Game info", exact=False)
+        if info_btn.is_visible():
+            info_btn.click()
+            time.sleep(3)
 
         extracted = {"theoretical_rtp": None, "volatility_level": None, "max_win_multiplier": None}
         rows = page.query_selector_all('tbody tr')
-
-        if not rows:
-            page.screenshot(path=f"stake_slot_fail_{slot.get('id')}.png")
 
         for row in rows:
             cells = row.query_selector_all('td')
@@ -160,8 +169,9 @@ def run():
         page = context.new_page()
         Stealth().apply_stealth_sync(page)
 
+        # Verify session is valid by checking dashboard
         page.goto("https://stake.com/casino/slots", wait_until="commit")
-        time.sleep(10)
+        time.sleep(15)
 
         for slot in slots:
             data = parse_slot_details(page, slot)
@@ -171,8 +181,12 @@ def run():
                     print(f"    [DB] {slot['title']} updated.")
                 except:
                     pass
-            time.sleep(random.randint(10, 20))
+
+            # Slow down to avoid being flagged after login
+            time.sleep(random.randint(15, 25))
+
         browser.close()
 
 
-if __name__ == "__main__": run()
+if __name__ == "__main__":
+    run()
